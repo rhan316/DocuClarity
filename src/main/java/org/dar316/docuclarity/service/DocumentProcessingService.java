@@ -1,15 +1,11 @@
 package org.dar316.docuclarity.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
-import org.dar316.docuclarity.dto.DocumentResultSummary;
-import org.dar316.docuclarity.dto.ExtractedPageResult;
-import org.dar316.docuclarity.dto.PageQualityScore;
-import org.dar316.docuclarity.dto.PdfPageText;
-import org.dar316.docuclarity.dto.PdfTextExtractionResult;
-import org.dar316.docuclarity.dto.RoutingDecision;
+import org.dar316.docuclarity.dto.*;
 import org.dar316.docuclarity.model.Document;
 import org.dar316.docuclarity.model.DocumentStatus;
 import org.dar316.docuclarity.repository.DocumentRepository;
+import org.dar316.docuclarity.util.DocumentProcessingServiceBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.transaction.support.TransactionTemplate;
@@ -45,26 +41,34 @@ public class DocumentProcessingService {
     private final PageQualityEvaluator pageQualityEvaluator;
     private final Tess4jOcrService tess4jOcrService;
     private final DocumentRepository documentRepository;
+    private final DocumentProgressService documentProgressService;
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactionTemplate;
     private final int maxProcessingAttempts;
 
-    public DocumentProcessingService(MinioStorageService minioStorageService,
-                                     PdfTextExtractionService pdfTextExtractionService,
-                                     PageQualityEvaluator pageQualityEvaluator,
-                                     Tess4jOcrService tess4jOcrService,
-                                     DocumentRepository documentRepository,
-                                     ObjectMapper objectMapper,
-                                     TransactionTemplate transactionTemplate,
-                                     int maxProcessingAttempts) {
+    public DocumentProcessingService(
+            MinioStorageService minioStorageService,
+            PdfTextExtractionService pdfTextExtractionService,
+            PageQualityEvaluator pageQualityEvaluator,
+            Tess4jOcrService tess4jOcrService,
+            DocumentRepository documentRepository,
+            DocumentProgressService documentProgressService,
+            ObjectMapper objectMapper,
+            TransactionTemplate transactionTemplate,
+            int maxProcessingAttempts) {
         this.minioStorageService = minioStorageService;
         this.pdfTextExtractionService = pdfTextExtractionService;
         this.pageQualityEvaluator = pageQualityEvaluator;
         this.tess4jOcrService = tess4jOcrService;
         this.documentRepository = documentRepository;
+        this.documentProgressService = documentProgressService;
         this.objectMapper = objectMapper;
         this.transactionTemplate = transactionTemplate;
         this.maxProcessingAttempts = maxProcessingAttempts;
+    }
+
+    public static DocumentProcessingServiceBuilder builder() {
+        return new DocumentProcessingServiceBuilder();
     }
 
     /**
@@ -102,6 +106,14 @@ public class DocumentProcessingService {
             Read the claimed document (status is now PROCESSING, committed)
          */
         Document document = documentRepository.findById(documentId).orElseThrow();
+        documentProgressService.notifyProgress(DocumentProgressEvent.of(
+                documentId,
+                DocumentStatus.PROCESSING,
+                "STARTED",
+                null,
+                null,
+                "Processing started"
+        ));
 
         /*
         Phase 3:
@@ -117,6 +129,14 @@ public class DocumentProcessingService {
     private void doProcess(Document document) throws Exception {
         UUID documentId = document.getId();
         String sourceKey = document.getStorageKey();
+        documentProgressService.notifyProgress(DocumentProgressEvent.of(
+                documentId,
+                DocumentStatus.PROCESSING,
+                "DOWNLOADING_SOURCE",
+                null,
+                null,
+                "Downloading source document"
+        ));
 
         // 1) Pobranie PDF z MinIO
         byte[] pdfBytes;
@@ -125,13 +145,23 @@ public class DocumentProcessingService {
         }
 
         // 2) Ekstrakcja PDFBox
+        documentProgressService.notifyProgress(DocumentProgressEvent.of(
+                documentId,
+                DocumentStatus.PROCESSING,
+                "EXTRACTING_TEXT",
+                null,
+                null,
+                "Extracting PDF text layers"
+        ));
         PdfTextExtractionResult extraction = pdfTextExtractionService.extractText(pdfBytes);
+        int totalPages = extraction.pageCount();
 
         // 3) Routing per strona + (opcjonalnie) OCR
         var pageResults = new ArrayList<ExtractedPageResult>(extraction.pageCount());
         boolean needsManualReview = false;
 
         for (PdfPageText page : extraction.pages()) {
+            int pageNum = page.pageNum();
             PageQualityScore quality = pageQualityEvaluator.evaluate(page);
             ExtractedPageResult result;
             if (quality.decision() == RoutingDecision.PDFBOX) {
@@ -141,7 +171,23 @@ public class DocumentProcessingService {
                         page.text(),
                         null,
                         quality.warnings());
+                documentProgressService.notifyProgress(DocumentProgressEvent.of(
+                        documentId,
+                        DocumentStatus.PROCESSING,
+                        "PAGE_EVALUATED_PDFBOX",
+                        pageNum,
+                        totalPages,
+                        "Page " + pageNum + "/" + totalPages + " accepted via PDFBox"
+                ));
             } else {
+                documentProgressService.notifyProgress(DocumentProgressEvent.of(
+                        documentId,
+                        DocumentStatus.PROCESSING,
+                        "OCR_PROCESSING_PAGE",
+                        pageNum,
+                        totalPages,
+                        "Page " + pageNum + "/" + totalPages + " running OCR"
+                ));
                 // OCR_REQUIRED — render + rozpoznanie
                 try {
                     var ocr = tess4jOcrService.ocrPage(pdfBytes, page.pageNum() - 1);
@@ -176,6 +222,15 @@ public class DocumentProcessingService {
             pageResults.add(result);
         }
 
+        documentProgressService.notifyProgress(DocumentProgressEvent.of(
+                documentId,
+                DocumentStatus.PROCESSING,
+                "SAVING_RESULTS",
+                null,
+                totalPages,
+                "Saving extraction results to storage"
+        ));
+
         // 4) Zapis wyników per strona + podsumowania w MinIO
         for (ExtractedPageResult pr : pageResults) {
             String pageKey = String.format("%s/pages/%03d/final.json",
@@ -202,10 +257,26 @@ public class DocumentProcessingService {
             managed.setErrorMessage(null);
             documentRepository.save(managed);
         });
+
+        // 6) Broadcast final termianl event
+        documentProgressService.notifyProgress(DocumentProgressEvent.of(
+                documentId,
+                decided,
+                decided.code(),
+                totalPages,
+                totalPages,
+                decided == DocumentStatus.COMPLETED
+                        ? "Document processing completed successfully"
+                        : "Document requires manual review"
+        ));
         log.info("Przetworzono dokument {} → {}", documentId, decided);
     }
 
     private void handleFailure(Document document, Exception e) {
+        if (document.getId() == null) {
+            log.error("Błąd przetwarzania: documentId jest null", e);
+            return;
+        }
         log.error("Błąd przetwarzania dokumentu {}: {}", document.getId(), e.getMessage(), e);
         DocumentProcessingException toThrow;
         if (e instanceof DocumentProcessingException dpe) {

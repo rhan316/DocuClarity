@@ -51,6 +51,7 @@ class DocumentProcessingServiceTest {
     PdfTextExtractionService pdfTextExtractionService;
     Tess4jOcrService tess4jOcrService;
     DocumentRepository documentRepository;
+    DocumentProgressService documentProgressService;
     TransactionTemplate transactionTemplate;
     /**QualityEvaluator zmockowany — testy wymuszają decyzję routingu. */
     PageQualityEvaluator pageQualityEvaluator;
@@ -68,6 +69,7 @@ class DocumentProcessingServiceTest {
         pdfTextExtractionService = Mockito.mock(PdfTextExtractionService.class);
         tess4jOcrService = Mockito.mock(Tess4jOcrService.class);
         documentRepository = Mockito.mock(DocumentRepository.class);
+        documentProgressService = Mockito.mock(DocumentProgressService.class);
         transactionTemplate = Mockito.mock(TransactionTemplate.class);
         pageQualityEvaluator = Mockito.mock(PageQualityEvaluator.class);
 
@@ -77,6 +79,7 @@ class DocumentProcessingServiceTest {
                 pageQualityEvaluator,
                 tess4jOcrService,
                 documentRepository,
+                documentProgressService,
                 objectMapper,
                 transactionTemplate,
                 3

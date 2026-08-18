@@ -1,11 +1,6 @@
 package org.dar316.docuclarity.config;
 
-import org.dar316.docuclarity.service.DocumentProcessingService;
-import org.dar316.docuclarity.service.MinioStorageService;
-import org.dar316.docuclarity.service.PageQualityEvaluator;
-import org.dar316.docuclarity.service.PdfTextExtractionService;
-import org.dar316.docuclarity.service.StreamConsumer;
-import org.dar316.docuclarity.service.Tess4jOcrService;
+import org.dar316.docuclarity.service.*;
 import org.dar316.docuclarity.repository.DocumentRepository;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
@@ -19,6 +14,7 @@ import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.data.redis.serializer.StringRedisSerializer;
 import org.springframework.data.redis.stream.StreamMessageListenerContainer;
 import org.springframework.scheduling.annotation.EnableScheduling;
+import org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -43,7 +39,11 @@ import java.time.Duration;
  */
 @Configuration
 @EnableScheduling
-@ConditionalOnProperty(name = "docuclarity.queue.enabled", havingValue = "true", matchIfMissing = true)
+@ConditionalOnProperty(
+        name = "docuclarity.queue.enabled",
+        havingValue = "true",
+        matchIfMissing = true
+)
 public class QueueConfig {
 
     @Bean
@@ -60,13 +60,13 @@ public class QueueConfig {
     @Bean(name = "processingTaskExecutor")
     public TaskExecutor processingTaskExecutor(
             @Value("${docuclarity.queue.worker-pool-size:4}") int poolSize) {
-        org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor executor =
-                new org.springframework.scheduling.concurrent.ThreadPoolTaskExecutor();
+        var executor = new ThreadPoolTaskExecutor();
         executor.setCorePoolSize(poolSize);
         executor.setMaxPoolSize(poolSize);
         executor.setQueueCapacity(poolSize * 2);
         executor.setThreadNamePrefix("docu-worker-");
         executor.initialize();
+
         return executor;
     }
 
@@ -77,6 +77,7 @@ public class QueueConfig {
             PageQualityEvaluator pageQualityEvaluator,
             Tess4jOcrService tess4jOcrService,
             DocumentRepository documentRepository,
+            DocumentProgressService documentProgressService,
             @Qualifier("appObjectMapper") ObjectMapper objectMapper,
             TransactionTemplate transactionTemplate,
             @Value("${docuclarity.queue.max-processing-attempts:3}") int maxProcessingAttempts) {
@@ -86,6 +87,7 @@ public class QueueConfig {
                 pageQualityEvaluator,
                 tess4jOcrService,
                 documentRepository,
+                documentProgressService,
                 objectMapper,
                 transactionTemplate,
                 maxProcessingAttempts);
@@ -104,6 +106,7 @@ public class QueueConfig {
                 StreamMessageListenerContainer.create(connectionFactory, options);
         streamConsumer.subscribe(container);
         container.start();
+
         return container;
     }
 }
