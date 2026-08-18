@@ -3,6 +3,7 @@ package org.dar316.docuclarity.service;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
+import org.springframework.data.redis.RedisSystemException;
 import org.springframework.data.redis.connection.stream.MapRecord;
 import org.springframework.data.redis.connection.stream.ReadOffset;
 import org.springframework.data.redis.connection.stream.RecordId;
@@ -69,11 +70,18 @@ public class StreamConsumer {
 
     private void ensureConsumerGroup() {
         try {
-            redisTemplate.opsForStream().createGroup(streamKey, consumerGroup);
-        } catch (Exception e) {
-            // Grupa już istnieje (BUSYGROUP) — dopuszczalne
-            log.debug("Consumer group {} już istnieje lub stream niegotowy: {}",
-                    consumerGroup, e.getMessage());
+            redisTemplate
+                    .opsForStream()
+                    .createGroup(streamKey, consumerGroup);
+        } catch (RedisSystemException e) {
+            if (e.getCause() instanceof RedisSystemException
+                    && e.getMessage() != null
+                    && e.getMessage().contains("BUSYGROUP")
+            ) {
+                log.debug("Consumer group {} already exists", consumerGroup);
+            } else {
+                log.warn("Failed to create consumer group {}", consumerGroup);
+            }
         }
     }
 

@@ -11,7 +11,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
+import java.io.ByteArrayInputStream;
 import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 
 /**
  * Serwis przechowywania plików w MinIO.
@@ -62,10 +64,10 @@ public class MinioStorageService {
      * @param contentType  typ MIME pliku
      * @param contentLength długość pliku w bajtach (-1 jeśli nieznana)
      */
-    public void uploadFile(String storageKey,
-                           InputStream inputStream,
-                           String contentType,
-                           long contentLength) {
+    public void uploadFile( String storageKey,
+                            InputStream inputStream,
+                            String contentType,
+                            long contentLength) {
         try {
             minioClient.putObject(PutObjectArgs.builder()
                     .bucket(bucket)
@@ -132,12 +134,14 @@ public class MinioStorageService {
      * @throws MinioStorageException gdy upload się nie powiedzie
      */
     public void uploadJson(String storageKey, String content) {
-        try (InputStream is = new java.io.ByteArrayInputStream(
+        byte[] bytes = content.getBytes(StandardCharsets.UTF_8);
+
+        try (var is = new ByteArrayInputStream(
                 content.getBytes(java.nio.charset.StandardCharsets.UTF_8))) {
             minioClient.putObject(PutObjectArgs.builder()
                     .bucket(bucket)
                     .object(storageKey)
-                    .stream(is, content.length(), -1)
+                    .stream(is, bytes.length, -1)
                     .contentType("application/json")
                     .build());
         } catch (Exception e) {

@@ -18,6 +18,7 @@ import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.multipart.MultipartFile;
 
 import java.io.IOException;
+import java.net.URI;
 import java.util.Map;
 import java.util.UUID;
 
@@ -44,7 +45,7 @@ public class DocumentController {
      * Przyjmuje plik PDF przez multipart upload.
      *
      * @param file plik multipart
-     * @return 201 Created z metadanymi dokumentu
+     * @return 200 Created z metadanymi dokumentu
      */
     @PostMapping("/upload")
     public ResponseEntity<UploadResponse> upload(@RequestParam("file") MultipartFile file) {
@@ -68,7 +69,9 @@ public class DocumentController {
                     document.getCreatedAt());
 
             log.info("Upload zakończony: dokument {}", document.getId());
-            return ResponseEntity.ok(response);
+            return ResponseEntity
+                    .created(URI.create("/api/documents/" + document.getId()))
+                    .body(response);
         } catch (IOException e) {
             throw new DocumentUploadException(
                     "Błąd odczytu pliku: " + e.getMessage(), e);

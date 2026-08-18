@@ -7,6 +7,7 @@ import org.dar316.docuclarity.service.PdfTextExtractionService;
 import org.dar316.docuclarity.service.StreamConsumer;
 import org.dar316.docuclarity.service.Tess4jOcrService;
 import org.dar316.docuclarity.repository.DocumentRepository;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.annotation.Bean;
@@ -76,7 +77,7 @@ public class QueueConfig {
             PageQualityEvaluator pageQualityEvaluator,
             Tess4jOcrService tess4jOcrService,
             DocumentRepository documentRepository,
-            ObjectMapper objectMapper,
+            @Qualifier("appObjectMapper") ObjectMapper objectMapper,
             TransactionTemplate transactionTemplate,
             @Value("${docuclarity.queue.max-processing-attempts:3}") int maxProcessingAttempts) {
         return new DocumentProcessingService(

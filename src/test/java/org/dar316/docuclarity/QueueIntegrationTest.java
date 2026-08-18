@@ -103,7 +103,7 @@ class QueueIntegrationTest {
 
     @Autowired MinioStorageService minioStorageService;
 
-    @Autowired ObjectMapper objectMapper;
+    @Autowired @Qualifier("appObjectMapper") ObjectMapper objectMapper;
 
     @Autowired @Qualifier("queueRedisTemplate")
     RedisTemplate<String, String> queueRedisTemplate;

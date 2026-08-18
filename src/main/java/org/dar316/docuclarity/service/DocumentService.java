@@ -8,6 +8,7 @@ import org.dar316.docuclarity.repository.DocumentRepository;
 import org.dar316.docuclarity.repository.OutboxRepository;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 
@@ -44,7 +45,7 @@ public class DocumentService {
     public DocumentService(MinioStorageService minioStorageService,
                            DocumentRepository documentRepository,
                            OutboxRepository outboxRepository,
-                           ObjectMapper objectMapper,
+                           @Qualifier("appObjectMapper") ObjectMapper objectMapper,
                            TransactionTemplate transactionTemplate) {
         this.minioStorageService = minioStorageService;
         this.documentRepository = documentRepository;

@@ -10,6 +10,12 @@
 version: "3"
 
 services:
+  redis:
+    image: redis:latest
+    container_name: docuclarity-redis
+    ports:
+      - "6379:6379"
+    restart: unless-stopped
   postgres:
     image: postgres:latest
     container_name: docuclarity-postgres
@@ -46,6 +52,8 @@ services:
     ports:
       - "8080:8080"
     environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
       # tessdata w kontenerze (instalowane przez apt)
       TESSDATA_PREFIX: /usr/share/tesseract-ocr/5/tessdata
       # Konfiguracja OCR — eng+pol dla dokumentów mieszanych
@@ -61,6 +69,7 @@ services:
       MINIO_SECRET_KEY: minioadmin
       MINIO_BUCKET: docuclarity
     depends_on:
+      - redis
       - postgres
       - minio
     restart: unless-stopped

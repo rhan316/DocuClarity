@@ -1,6 +1,5 @@
 package org.dar316.docuclarity.service;
 
-import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.dar316.docuclarity.dto.DocumentResultSummary;
 import org.dar316.docuclarity.dto.ExtractedPageResult;
@@ -16,10 +15,7 @@ import org.slf4j.LoggerFactory;
 import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Instant;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Map;
-import java.util.UUID;
+import java.util.*;
 
 /**
  * Serwis wykonujący właściwe przetwarzanie dokumentu (worker).
@@ -54,13 +50,13 @@ public class DocumentProcessingService {
     private final int maxProcessingAttempts;
 
     public DocumentProcessingService(MinioStorageService minioStorageService,
-                                      PdfTextExtractionService pdfTextExtractionService,
-                                      PageQualityEvaluator pageQualityEvaluator,
-                                      Tess4jOcrService tess4jOcrService,
-                                      DocumentRepository documentRepository,
-                                      ObjectMapper objectMapper,
-                                      TransactionTemplate transactionTemplate,
-                                      int maxProcessingAttempts) {
+                                     PdfTextExtractionService pdfTextExtractionService,
+                                     PageQualityEvaluator pageQualityEvaluator,
+                                     Tess4jOcrService tess4jOcrService,
+                                     DocumentRepository documentRepository,
+                                     ObjectMapper objectMapper,
+                                     TransactionTemplate transactionTemplate,
+                                     int maxProcessingAttempts) {
         this.minioStorageService = minioStorageService;
         this.pdfTextExtractionService = pdfTextExtractionService;
         this.pageQualityEvaluator = pageQualityEvaluator;
@@ -77,25 +73,40 @@ public class DocumentProcessingService {
      * @param documentId id dokumentu do przetworzenia
      */
     public void process(UUID documentId) {
-        Document document = transactionTemplate.execute(status -> {
-            Document managed = documentRepository.findById(documentId).orElse(null);
-            if (managed == null) {
-                throw new DocumentProcessingException(
-                        "Dokument nie istnieje: " + documentId);
+        /*
+        Phase 1:
+            Atomic claim - only one thread can succeed.
+            The UPDATE ... WHERE status = 'UPLOADED' is a single atomic
+            operation: the row lock is acquired and the status is changed
+            in the same statement. A concurrent transaction that evaluates
+            the WHERE clause after this one commits will see 'PROCESSING'
+            and match 0 rows.
+         */
+        Integer rowsAffected = transactionTemplate.execute(
+                status -> documentRepository.claimForProcessing(documentId)
+        );
+
+        if (rowsAffected == null ||  rowsAffected == 0) {
+            // Claim failed - distinguish "not found" from 'already in progress' / done"
+            Document existing = documentRepository.findById(documentId).orElse(null);
+            if (existing == null) {
+                log.error("Document not found for document id {}", documentId);
+                throw new DocumentProcessingException("Document not found: " + documentId);
             }
-            if (managed.getStatusEnum() == DocumentStatus.COMPLETED) {
-                // Idempotentność: redis-stream mógł dostarczyć zdarzenie 2x
-                log.info("Dokument {} już COMPLETED — pomijam", documentId);
-                return null;
-            }
-            managed.setStatus(DocumentStatus.PROCESSING);
-            managed.setProcessingAttempts(managed.getProcessingAttempts() + 1);
-            return documentRepository.save(managed);
-        });
-        if (document == null) {
+            log.info("Document {} have status {} - skipping", documentId, existing.getStatus());
             return;
         }
 
+        /*
+        Phase 2:
+            Read the claimed document (status is now PROCESSING, committed)
+         */
+        Document document = documentRepository.findById(documentId).orElseThrow();
+
+        /*
+        Phase 3:
+            Process
+         */
         try {
             doProcess(document);
         } catch (Exception e) {
