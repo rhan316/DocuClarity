@@ -1,0 +1,70 @@
+# =============================================================================
+# DocuClarity — Podman Compose
+# =============================================================================
+# Uruchomienie:  podman-compose up
+# Zatrzymanie:   podman-compose down
+#
+# Po uruchomieniu aplikacja nasłuchuje na http://localhost:8080
+# =============================================================================
+
+version: "3"
+
+services:
+  postgres:
+    image: postgres:latest
+    container_name: docuclarity-postgres
+    environment:
+      POSTGRES_DB: docuclarity
+      POSTGRES_USER: docuclarity
+      POSTGRES_PASSWORD: docuclarity
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  minio:
+    image: minio/minio:latest
+    container_name: docuclarity-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - miniodata:/data
+    restart: unless-stopped
+
+  docuclarity:
+    build:
+      context: .
+      dockerfile: Containerfile
+    image: docuclarity:latest
+    container_name: docuclarity
+    ports:
+      - "8080:8080"
+    environment:
+      # tessdata w kontenerze (instalowane przez apt)
+      TESSDATA_PREFIX: /usr/share/tesseract-ocr/5/tessdata
+      # Konfiguracja OCR — eng+pol dla dokumentów mieszanych
+      DOCUCLARITY_OCR_LANGUAGE: eng+pol
+      DOCUCLARITY_OCR_TESSDATA_PATH: /usr/share/tesseract-ocr/5/tessdata
+      # PostgreSQL
+      POSTGRES_URL: jdbc:postgresql://postgres:5432/docuclarity
+      POSTGRES_USER: docuclarity
+      POSTGRES_PASSWORD: docuclarity
+      # MinIO
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: docuclarity
+    depends_on:
+      - postgres
+      - minio
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  miniodata:

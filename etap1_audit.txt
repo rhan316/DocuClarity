@@ -1,0 +1,1161 @@
+=== FILE: src/main/resources/db/migration/V1__documents_and_outbox.sql ===
+-- V1: Tabele fundamentu — dokumenty i outbox (Transactional Outbox pattern)
+--
+-- documents: rekordy przesłanych plików (metadane + status przetwarzania)
+-- outbox: zdarzenia do publikacji na Redis Streams (spójność zapisu stanu i publikacji)
+--
+-- Uwaga: statusy jako TEXT + CHECK constraint zamiast enum PostgreSQL.
+-- Spring Data JDBC mapuje String na varchar; natywne enumy PostgreSQL wymagałyby
+-- custom converterów. CHECK constraint daje tę samą integralność danych.
+
+CREATE TABLE documents (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    original_filename   TEXT NOT NULL,
+    content_type    TEXT NOT NULL,
+    content_length  BIGINT NOT NULL,
+    -- Klucz obiektu w MinIO: documents/{id}/source
+    storage_key     TEXT NOT NULL UNIQUE,
+    status          TEXT NOT NULL DEFAULT 'UPLOADED'
+                    CHECK (status IN ('UPLOADED', 'PROCESSING', 'COMPLETED', 'FAILED', 'MANUAL_REVIEW')),
+    -- Liczba prób przetwarzania (retry)
+    processing_attempts INTEGER NOT NULL DEFAULT 0,
+    -- Komunikat błędu (gdy status FAILED)
+    error_message   TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Indeks po statusie — worker pobiera dokumenty w danym statusie
+CREATE INDEX idx_documents_status ON documents (status);
+-- Indeks po dacie utworzenia — kolejność FIFO
+CREATE INDEX idx_documents_created_at ON documents (created_at);
+
+CREATE TABLE outbox (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    -- Id dokumentu, którego dotyczy zdarzenie
+    document_id     UUID NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
+    -- Typ zdarzenia (np. DOCUMENT_UPLOADED)
+    event_type      TEXT NOT NULL,
+    -- Payload zdarzenia jako TEXT (JSON) — Spring Data JDBC mapuje String na varchar,
+    -- natywny JSONB wymagałby custom convertera
+    payload         TEXT NOT NULL,
+    status          TEXT NOT NULL DEFAULT 'PENDING'
+                    CHECK (status IN ('PENDING', 'PUBLISHED', 'FAILED')),
+    -- Liczba prób publikacji
+    attempts        INTEGER NOT NULL DEFAULT 0,
+    -- Komunikat błędu (gdy status FAILED)
+    error_message   TEXT,
+    created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    published_at    TIMESTAMPTZ
+);
+
+-- Indeks po statusie — publisher pobiera wpisy PENDING
+CREATE INDEX idx_outbox_status ON outbox (status);
+-- Indeks po dokumencie — historii zdarzeń dla dokumentu
+CREATE INDEX idx_outbox_document_id ON outbox (document_id);
+-- Indeks po dacie utworzenia — kolejność FIFO
+CREATE INDEX idx_outbox_created_at ON outbox (created_at);
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/config/MinioProperties.java ===
+package org.dar316.docuclarity.config;
+
+import org.springframework.boot.context.properties.ConfigurationProperties;
+
+/**
+ * Konfiguracja połączenia z MinIO.
+ *
+ * Właściwości z prefiksem docuclarity.minio w application.properties:
+ * - endpoint: URL serwera MinIO (np. http://localhost:9000)
+ * - accessKey: klucz dostępu
+ * - secretKey: klucz tajny
+ * - bucket: nazwa bucketu na pliki źródłowe
+ */
+@ConfigurationProperties(prefix = "docuclarity.minio")
+public record MinioProperties(
+        String endpoint,
+        String accessKey,
+        String secretKey,
+        String bucket
+) {
+    public MinioProperties {
+        if (bucket == null || bucket.isBlank()) {
+            throw new IllegalArgumentException(
+                    "docuclarity.minio.bucket nie może być pusty");
+        }
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/config/MinioConfig.java ===
+package org.dar316.docuclarity.config;
+
+import io.minio.MinioClient;
+import org.springframework.boot.context.properties.EnableConfigurationProperties;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+import com.fasterxml.jackson.databind.ObjectMapper;
+
+/**
+ * Konfiguracja klienta MinIO.
+ *
+ * Tworzy bean MinioClient na podstawie właściwości z docuclarity.minio.*
+ *
+ * Bean ObjectMapper (Jackson 2) jest wymagany przez MinIO SDK 8.5.17, które
+ * używa com.fasterxml.jackson — Spring Boot 4 domyślnie konfiguruje Jackson 3
+ * (tools.jackson), więc bean ObjectMapper Jackson 2 nie istnieje automatycznie.
+ */
+@Configuration
+@EnableConfigurationProperties(MinioProperties.class)
+public class MinioConfig {
+
+    @Bean
+    public MinioClient minioClient(MinioProperties properties) {
+        return MinioClient.builder()
+                .endpoint(properties.endpoint())
+                .credentials(properties.accessKey(), properties.secretKey())
+                .build();
+    }
+
+    @Bean
+    public ObjectMapper objectMapper() {
+        return new ObjectMapper();
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/config/ResourceInitializer.java ===
+package org.dar316.docuclarity.config;
+
+import org.dar316.docuclarity.service.MinioStorageService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+/**
+ * Inicjalizacja zasobów przy starcie aplikacji.
+ *
+ * Tworzy bucket MinIO jeśli nie istnieje — bezpieczne idempotentne wywołanie.
+ */
+@Configuration
+public class ResourceInitializer {
+
+    private static final Logger log = LoggerFactory.getLogger(ResourceInitializer.class);
+
+    @Bean
+    CommandLineRunner initializeMinioBucket(MinioStorageService minioStorageService) {
+        return args -> {
+            log.info("Inicjalizacja bucketu MinIO...");
+            minioStorageService.initializeBucket();
+            log.info("MinIO gotowy");
+        };
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/service/MinioStorageService.java ===
+package org.dar316.docuclarity.service;
+
+import io.minio.BucketExistsArgs;
+import io.minio.MakeBucketArgs;
+import io.minio.MinioClient;
+import io.minio.PutObjectArgs;
+import io.minio.RemoveObjectArgs;
+import io.minio.errors.ErrorResponseException;
+import org.dar316.docuclarity.config.MinioProperties;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+
+import java.io.InputStream;
+
+/**
+ * Serwis przechowywania plików w MinIO.
+ *
+ * Odpowiada za:
+ * - inicjalizację bucketu (tworzenie jeśli nie istnieje)
+ * - upload pliku źródłowego do MinIO
+ * - usuwanie pliku (kompensacja przy błędzie zapisu do DB)
+ *
+ * Klucz obiektu ma format: documents/{documentId}/source
+ * Pozwala to na późniejsze dodanie wyników per strona w tej samej ścieżce.
+ */
+@Service
+public class MinioStorageService {
+
+    private static final Logger log = LoggerFactory.getLogger(MinioStorageService.class);
+
+    private final MinioClient minioClient;
+    private final String bucket;
+
+    public MinioStorageService(MinioClient minioClient, MinioProperties properties) {
+        this.minioClient = minioClient;
+        this.bucket = properties.bucket();
+    }
+
+    /**
+     * Inicjalizuje bucket jeśli nie istnieje. Wywoływane przy starcie aplikacji.
+     */
+    public void initializeBucket() {
+        try {
+            boolean exists = minioClient.bucketExists(
+                    BucketExistsArgs.builder().bucket(bucket).build());
+            if (!exists) {
+                minioClient.makeBucket(MakeBucketArgs.builder().bucket(bucket).build());
+                log.info("Utworzono bucket MinIO: {}", bucket);
+            }
+        } catch (Exception e) {
+            throw new MinioStorageException(
+                    "Nie udało się zainicjalizować bucketu MinIO: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Uploaduje plik do MinIO.
+     *
+     * @param storageKey   klucz obiektu (np. documents/{id}/source)
+     * @param inputStream  zawartość pliku
+     * @param contentType  typ MIME pliku
+     * @param contentLength długość pliku w bajtach (-1 jeśli nieznana)
+     */
+    public void uploadFile(String storageKey,
+                           InputStream inputStream,
+                           String contentType,
+                           long contentLength) {
+        try {
+            minioClient.putObject(PutObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(storageKey)
+                    .stream(inputStream, contentLength, -1)
+                    .contentType(contentType)
+                    .build());
+        } catch (Exception e) {
+            throw new MinioStorageException(
+                    "Błąd uploadu pliku do MinIO: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Usuwa plik z MinIO. Używane jako kompensacja gdy zapis do DB nie powiedzie się.
+     *
+     * @param storageKey klucz obiektu do usunięcia
+     */
+    public void deleteFile(String storageKey) {
+        try {
+            minioClient.removeObject(RemoveObjectArgs.builder()
+                    .bucket(bucket)
+                    .object(storageKey)
+                    .build());
+            log.info("Usunięto plik z MinIO (kompensacja): {}", storageKey);
+        } catch (ErrorResponseException e) {
+            // Object not found — ignorujemy, celem kompensacji już osiągnięto
+            log.debug("Plik nie istnieje w MinIO (pomijam): {}", storageKey);
+        } catch (Exception e) {
+            log.error("Błąd usuwania pliku z MinIO: {}", storageKey, e);
+        }
+    }
+
+    /** Zwraca nazwę bucketu */
+    public String getBucket() {
+        return bucket;
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/service/MinioStorageException.java ===
+package org.dar316.docuclarity.service;
+
+/**
+ * Wyjątek runtime dla błędów operacji MinIO.
+ */
+public class MinioStorageException extends RuntimeException {
+    public MinioStorageException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/service/DocumentService.java ===
+package org.dar316.docuclarity.service;
+
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import org.dar316.docuclarity.model.Document;
+import org.dar316.docuclarity.model.OutboxEntry;
+import org.dar316.docuclarity.repository.DocumentRepository;
+import org.dar316.docuclarity.repository.OutboxRepository;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.io.InputStream;
+import java.util.Map;
+import java.util.Objects;
+import java.util.UUID;
+
+/**
+ * Serwis zarządzania dokumentami — orkiestracja uploadu.
+ *
+ * Przepływ:
+ * 1. Upload pliku do MinIO (storageKey = documents/{uuid}/source)
+ * 2. W jednej transakcji DB: zapis dokumentu (status UPLOADED) + wpis outbox (DOCUMENT_UPLOADED)
+ * 3. Jeśli DB fails → kompensacja: usunięcie pliku z MinIO
+ *
+ * UUID dokumentu jest generowane przed uploadem — storageKey jest znany przed zapisem do DB.
+ * Pozwala to na atomowy zapis: plik w MinIO + rekord w DB wskazujący na ten sam klucz.
+ */
+@Service
+public class DocumentService {
+
+    private static final Logger log = LoggerFactory.getLogger(DocumentService.class);
+    private static final String STORAGE_KEY_PREFIX = "documents/";
+    private static final String STORAGE_KEY_SUFFIX = "/source";
+    private static final String EVENT_DOCUMENT_UPLOADED = "DOCUMENT_UPLOADED";
+
+    private final MinioStorageService minioStorageService;
+    private final DocumentRepository documentRepository;
+    private final OutboxRepository outboxRepository;
+    private final ObjectMapper objectMapper;
+
+    public DocumentService(MinioStorageService minioStorageService,
+                           DocumentRepository documentRepository,
+                           OutboxRepository outboxRepository,
+                           ObjectMapper objectMapper) {
+        this.minioStorageService = minioStorageService;
+        this.documentRepository = documentRepository;
+        this.outboxRepository = outboxRepository;
+        this.objectMapper = objectMapper;
+    }
+
+    /**
+     * Przyjmuje plik, zapisuje go w MinIO i tworzy rekord dokumentu + wpis outbox.
+     *
+     * @param originalFilename nazwa oryginalna pliku
+     * @param contentType      typ MIME pliku
+     * @param contentLength    długość pliku w bajtach
+     * @param inputStream      strumień z zawartością pliku
+     * @return zapisany dokument z wygenerowanym ID
+     * @throws DocumentUploadException gdy upload do MinIO lub zapis do DB się nie powiedzie
+     */
+    public Document uploadDocument(String originalFilename,
+                                   String contentType,
+                                   long contentLength,
+                                   InputStream inputStream) {
+        validateInput(originalFilename, contentType, contentLength, inputStream);
+
+        UUID documentId = UUID.randomUUID();
+        String storageKey = buildStorageKey(documentId);
+
+        // Krok 1: Upload do MinIO (poza transakcją DB)
+        minioStorageService.uploadFile(storageKey, inputStream, contentType, contentLength);
+        log.info("Plik uploaded do MinIO: {}, dokument: {}", storageKey, documentId);
+
+        // Krok 2: Zapis do DB w transakcji (dokument + outbox)
+        try {
+            return saveDocumentWithOutbox(documentId, originalFilename, contentType,
+                    contentLength, storageKey);
+        } catch (Exception e) {
+            // Kompensacja: usuń plik z MinIO, bo DB zapis się nie powiódł
+            log.error("Błąd zapisu dokumentu do DB, kompensacja — usuwam plik z MinIO: {}",
+                    storageKey, e);
+            minioStorageService.deleteFile(storageKey);
+            throw new DocumentUploadException(
+                    "Błąd zapisu dokumentu do bazy danych: " + e.getMessage(), e);
+        }
+    }
+
+    @Transactional
+    protected Document saveDocumentWithOutbox(UUID documentId,
+                                              String originalFilename,
+                                              String contentType,
+                                              long contentLength,
+                                              String storageKey) {
+        Document document = new Document(originalFilename, contentType, contentLength, storageKey);
+        document.setId(documentId);
+        document = documentRepository.save(document);
+
+        OutboxEntry outboxEntry = new OutboxEntry(
+                document.getId(),
+                EVENT_DOCUMENT_UPLOADED,
+                buildOutboxPayload(document));
+        outboxRepository.save(outboxEntry);
+
+        log.info("Zapisano dokument {} i wpis outbox {}", document.getId(), outboxEntry.getId());
+        return document;
+    }
+
+    private String buildOutboxPayload(Document document) {
+        try {
+            Map<String, Object> payload = Map.of(
+                    "documentId", document.getId().toString(),
+                    "storageKey", document.getStorageKey(),
+                    "contentType", document.getContentType(),
+                    "contentLength", document.getContentLength(),
+                    "originalFilename", document.getOriginalFilename()
+            );
+            return objectMapper.writeValueAsString(payload);
+        } catch (JsonProcessingException e) {
+            throw new DocumentUploadException(
+                    "Błąd serializacji payloadu outbox: " + e.getMessage(), e);
+        }
+    }
+
+    private String buildStorageKey(UUID documentId) {
+        return STORAGE_KEY_PREFIX + documentId + STORAGE_KEY_SUFFIX;
+    }
+
+    private void validateInput(String originalFilename,
+                               String contentType,
+                               long contentLength,
+                               InputStream inputStream) {
+        if (originalFilename == null || originalFilename.isBlank()) {
+            throw new DocumentUploadException("Nazwa pliku nie może być pusta", null);
+        }
+        if (contentType == null || contentType.isBlank()) {
+            throw new DocumentUploadException("Typ zawartości nie może być pusty", null);
+        }
+        if (contentLength <= 0) {
+            throw new DocumentUploadException(
+                    "Długość pliku musi być dodatnia: " + contentLength, null);
+        }
+        if (Objects.isNull(inputStream)) {
+            throw new DocumentUploadException("Strumień wejściowy nie może być null", null);
+        }
+    }
+
+    /**
+     * Pobiera dokument po ID.
+     *
+     * @param id UUID dokumentu
+     * @return dokument
+     * @throws DocumentNotFoundException gdy dokument nie istnieje
+     */
+    public Document getDocument(UUID id) {
+        return documentRepository.findById(id)
+                .orElseThrow(() -> new DocumentNotFoundException(
+                        "Nie znaleziono dokumentu: " + id));
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/service/DocumentUploadException.java ===
+package org.dar316.docuclarity.service;
+
+/**
+ * Wyjątek runtime dla błędów uploadu dokumentu.
+ */
+public class DocumentUploadException extends RuntimeException {
+    public DocumentUploadException(String message, Throwable cause) {
+        super(message, cause);
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/service/DocumentNotFoundException.java ===
+package org.dar316.docuclarity.service;
+
+/**
+ * Wyjątek runtime gdy dokument nie zostanie znaleziony.
+ */
+public class DocumentNotFoundException extends RuntimeException {
+    public DocumentNotFoundException(String message) {
+        super(message);
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/model/Document.java ===
+package org.dar316.docuclarity.model;
+
+import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.PersistenceCreator;
+import org.springframework.data.annotation.Transient;
+import org.springframework.data.domain.Persistable;
+import org.springframework.data.relational.core.mapping.Column;
+import org.springframework.data.relational.core.mapping.Table;
+
+import java.time.Instant;
+import java.util.UUID;
+
+/**
+ * Encja dokumentu — rekord przesłanego pliku z metadanymi i statusem przetwarzania.
+ *
+ * Odpowiada tabeli documents w PostgreSQL. Mapowanie przez Spring Data JDBC.
+ * Implementuje Persistable — @PersistenceConstructor oznacza konstruktor
+ * wywoływany przy odczycie z DB (isNew=false). Domyślny konstruktor ustawia
+ * isNew=true, pozwalając na ustawienie ID przed save bez konwersji na UPDATE.
+ */
+@Table("documents")
+public class Document implements Persistable<UUID> {
+
+    @Id
+    private UUID id;
+
+    @Column("original_filename")
+    private String originalFilename;
+
+    @Column("content_type")
+    private String contentType;
+
+    @Column("content_length")
+    private long contentLength;
+
+    @Column("storage_key")
+    private String storageKey;
+
+    private String status;
+
+    @Column("processing_attempts")
+    private int processingAttempts;
+
+    @Column("error_message")
+    private String errorMessage;
+
+    @Column("created_at")
+    private Instant createdAt;
+
+    @Column("updated_at")
+    private Instant updatedAt;
+
+    @Transient
+    private boolean isNew = true;
+
+    // Konstruktor dla nowych dokumentów (isNew=true)
+    public Document(String originalFilename,
+                    String contentType,
+                    long contentLength,
+                    String storageKey) {
+        this.originalFilename = originalFilename;
+        this.contentType = contentType;
+        this.contentLength = contentLength;
+        this.storageKey = storageKey;
+        this.status = "UPLOADED";
+        this.processingAttempts = 0;
+        this.isNew = true;
+    }
+
+    // Konstruktor dla Spring Data JDBC — odczyt z DB (isNew=false)
+    @PersistenceCreator
+    public Document(UUID id, String originalFilename, String contentType,
+                    long contentLength, String storageKey, String status,
+                    int processingAttempts, String errorMessage,
+                    Instant createdAt, Instant updatedAt) {
+        this.id = id;
+        this.originalFilename = originalFilename;
+        this.contentType = contentType;
+        this.contentLength = contentLength;
+        this.storageKey = storageKey;
+        this.status = status;
+        this.processingAttempts = processingAttempts;
+        this.errorMessage = errorMessage;
+        this.createdAt = createdAt;
+        this.updatedAt = updatedAt;
+        this.isNew = false;
+    }
+
+    public Document() {
+    }
+
+    // --- Gettery ---
+
+    @Override
+    public UUID getId() {
+        return id;
+    }
+
+    @Override
+    public boolean isNew() {
+        return isNew;
+    }
+
+    public String getOriginalFilename() {
+        return originalFilename;
+    }
+
+    public String getContentType() {
+        return contentType;
+    }
+
+    public long getContentLength() {
+        return contentLength;
+    }
+
+    public String getStorageKey() {
+        return storageKey;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public int getProcessingAttempts() {
+        return processingAttempts;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public Instant getUpdatedAt() {
+        return updatedAt;
+    }
+
+    // --- Settery (używane przez Spring Data JDBC i logikę biznesową) ---
+
+    public void setId(UUID id) {
+        this.id = id;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public void setProcessingAttempts(int processingAttempts) {
+        this.processingAttempts = processingAttempts;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
+    }
+
+    public void setCreatedAt(Instant createdAt) {
+        this.createdAt = createdAt;
+    }
+
+    public void setUpdatedAt(Instant updatedAt) {
+        this.updatedAt = updatedAt;
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/model/OutboxEntry.java ===
+package org.dar316.docuclarity.model;
+
+import org.springframework.data.annotation.Id;
+import org.springframework.data.annotation.PersistenceCreator;
+import org.springframework.data.annotation.Transient;
+import org.springframework.data.domain.Persistable;
+import org.springframework.data.relational.core.mapping.Column;
+import org.springframework.data.relational.core.mapping.Table;
+
+import java.time.Instant;
+import java.util.UUID;
+
+/**
+ * Encja wpisu outbox — zdarzenie do publikacji na Redis Streams.
+ *
+ * Wzorzec Transactional Outbox: wpis i dokument są zapisywane w jednej transakcji.
+ * Publisher odczytuje wpisy PENDING i publikuje je na Redis Streams.
+ */
+@Table("outbox")
+public class OutboxEntry implements Persistable<UUID> {
+
+    @Id
+    private UUID id;
+
+    @Column("document_id")
+    private UUID documentId;
+
+    @Column("event_type")
+    private String eventType;
+
+    private String payload;
+
+    private String status;
+
+    private int attempts;
+
+    @Column("error_message")
+    private String errorMessage;
+
+    @Column("created_at")
+    private Instant createdAt;
+
+    @Column("published_at")
+    private Instant publishedAt;
+
+    @Transient
+    private boolean isNew = true;
+
+    public OutboxEntry() {
+    }
+
+    // Konstruktor dla nowych wpisów (isNew=true)
+    public OutboxEntry(UUID documentId, String eventType, String payload) {
+        this.documentId = documentId;
+        this.eventType = eventType;
+        this.payload = payload;
+        this.status = "PENDING";
+        this.attempts = 0;
+        this.isNew = true;
+    }
+
+    // Konstruktor dla Spring Data JDBC — odczyt z DB (isNew=false)
+    @PersistenceCreator
+    public OutboxEntry(UUID id, UUID documentId, String eventType, String payload,
+                       String status, int attempts, String errorMessage,
+                       Instant createdAt, Instant publishedAt) {
+        this.id = id;
+        this.documentId = documentId;
+        this.eventType = eventType;
+        this.payload = payload;
+        this.status = status;
+        this.attempts = attempts;
+        this.errorMessage = errorMessage;
+        this.createdAt = createdAt;
+        this.publishedAt = publishedAt;
+        this.isNew = false;
+    }
+
+    // --- Gettery ---
+
+    @Override
+    public UUID getId() {
+        return id;
+    }
+
+    @Override
+    public boolean isNew() {
+        return isNew;
+    }
+
+    public UUID getDocumentId() {
+        return documentId;
+    }
+
+    public String getEventType() {
+        return eventType;
+    }
+
+    public String getPayload() {
+        return payload;
+    }
+
+    public String getStatus() {
+        return status;
+    }
+
+    public int getAttempts() {
+        return attempts;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public Instant getPublishedAt() {
+        return publishedAt;
+    }
+
+    // --- Settery ---
+
+    public void setId(UUID id) {
+        this.id = id;
+    }
+
+    public void setStatus(String status) {
+        this.status = status;
+    }
+
+    public void setAttempts(int attempts) {
+        this.attempts = attempts;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
+    }
+
+    public void setPublishedAt(Instant publishedAt) {
+        this.publishedAt = publishedAt;
+    }
+
+    public void setCreatedAt(Instant createdAt) {
+        this.createdAt = createdAt;
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/repository/DocumentRepository.java ===
+package org.dar316.docuclarity.repository;
+
+import org.dar316.docuclarity.model.Document;
+import org.springframework.data.repository.CrudRepository;
+import org.springframework.stereotype.Repository;
+
+import java.util.UUID;
+
+@Repository
+public interface DocumentRepository extends CrudRepository<Document, UUID> {
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/repository/OutboxRepository.java ===
+package org.dar316.docuclarity.repository;
+
+import org.dar316.docuclarity.model.OutboxEntry;
+import org.springframework.data.jdbc.repository.query.Query;
+import org.springframework.data.repository.CrudRepository;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+import java.util.UUID;
+
+@Repository
+public interface OutboxRepository extends CrudRepository<OutboxEntry, UUID> {
+
+    /**
+     * Pobiera wpisy PENDING posortowane po dacie utworzenia (FIFO).
+     */
+    @Query("SELECT * FROM outbox WHERE status = 'PENDING' ORDER BY created_at ASC")
+    List<OutboxEntry> findPending();
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/repository/EntityTimestampCallback.java ===
+package org.dar316.docuclarity.repository;
+
+import org.dar316.docuclarity.model.Document;
+import org.dar316.docuclarity.model.OutboxEntry;
+import org.springframework.data.relational.core.mapping.event.BeforeConvertCallback;
+import org.springframework.stereotype.Component;
+
+import java.time.Instant;
+
+/**
+ * Automatycznie ustawia created_at / updated_at przed zapisem encji do DB.
+ *
+ * Spring Data JDBC nie korzysta z DEFAULT z bazy — wstawia wszystkie kolumny.
+ * Ten callback ustawia timestampy przed konwersją do SQL INSERT/UPDATE.
+ */
+@Component
+public class EntityTimestampCallback implements BeforeConvertCallback<Object> {
+
+    @Override
+    public Object onBeforeConvert(Object entity) {
+        Instant now = Instant.now();
+        if (entity instanceof Document doc) {
+            if (doc.getCreatedAt() == null) {
+                doc.setCreatedAt(now);
+            }
+            doc.setUpdatedAt(now);
+        } else if (entity instanceof OutboxEntry entry) {
+            if (entry.getCreatedAt() == null) {
+                // Używamy getCreatedAt — dla OutboxEntry settery dla created_at nie istnieje,
+                // więc radzimy sobie przez refleksję brakującym setterem dodanym w encji
+                entry.setCreatedAt(now);
+            }
+        }
+        return entity;
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/controller/DocumentController.java ===
+package org.dar316.docuclarity.controller;
+
+import org.dar316.docuclarity.dto.DocumentStatusResponse;
+import org.dar316.docuclarity.dto.UploadResponse;
+import org.dar316.docuclarity.model.Document;
+import org.dar316.docuclarity.service.DocumentNotFoundException;
+import org.dar316.docuclarity.service.DocumentService;
+import org.dar316.docuclarity.service.DocumentUploadException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.multipart.MultipartFile;
+
+import java.io.IOException;
+import java.util.Map;
+import java.util.UUID;
+
+/**
+ * Kontroler REST dla operacji na dokumentach.
+ *
+ * Endpoints:
+ * - POST /api/documents/upload — upload pliku (multipart/form-data)
+ * - GET  /api/documents/{id}   — status dokumentu
+ */
+@RestController
+@RequestMapping("/api/documents")
+public class DocumentController {
+
+    private static final Logger log = LoggerFactory.getLogger(DocumentController.class);
+
+    private final DocumentService documentService;
+
+    public DocumentController(DocumentService documentService) {
+        this.documentService = documentService;
+    }
+
+    /**
+     * Przyjmuje plik PDF przez multipart upload.
+     *
+     * @param file plik multipart
+     * @return 201 Created z metadanymi dokumentu
+     */
+    @PostMapping("/upload")
+    public ResponseEntity<UploadResponse> upload(@RequestParam("file") MultipartFile file) {
+        if (file == null || file.isEmpty()) {
+            throw new DocumentUploadException("Plik jest pusty lub nie został przesłany", null);
+        }
+
+        try {
+            Document document = documentService.uploadDocument(
+                    file.getOriginalFilename(),
+                    file.getContentType(),
+                    file.getSize(),
+                    file.getInputStream());
+
+            UploadResponse response = new UploadResponse(
+                    document.getId(),
+                    document.getOriginalFilename(),
+                    document.getContentType(),
+                    document.getContentLength(),
+                    document.getStatus(),
+                    document.getCreatedAt());
+
+            log.info("Upload zakończony: dokument {}", document.getId());
+            return ResponseEntity.ok(response);
+        } catch (IOException e) {
+            throw new DocumentUploadException(
+                    "Błąd odczytu pliku: " + e.getMessage(), e);
+        }
+    }
+
+    /**
+     * Zwraca status dokumentu po ID.
+     *
+     * @param id UUID dokumentu
+     * @return 200 OK z metadanymi i statusem
+     */
+    @GetMapping("/{id}")
+    public ResponseEntity<DocumentStatusResponse> getStatus(@PathVariable UUID id) {
+        Document document = documentService.getDocument(id);
+        DocumentStatusResponse response = new DocumentStatusResponse(
+                document.getId(),
+                document.getOriginalFilename(),
+                document.getContentType(),
+                document.getContentLength(),
+                document.getStatus(),
+                document.getProcessingAttempts(),
+                document.getErrorMessage(),
+                document.getCreatedAt(),
+                document.getUpdatedAt());
+        return ResponseEntity.ok(response);
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/controller/GlobalExceptionHandler.java ===
+package org.dar316.docuclarity.controller;
+
+import org.dar316.docuclarity.service.DocumentNotFoundException;
+import org.dar316.docuclarity.service.DocumentUploadException;
+import org.dar316.docuclarity.service.MinioStorageException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+import java.util.Map;
+
+/**
+ * Globalna obsługa wyjątków — mapuje wyjątki serwisów na odpowiedzi HTTP.
+ */
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    private static final Logger log = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(DocumentNotFoundException.class)
+    public ResponseEntity<Map<String, String>> handleNotFound(DocumentNotFoundException e) {
+        return ResponseEntity.status(HttpStatus.NOT_FOUND)
+                .body(Map.of("error", e.getMessage()));
+    }
+
+    @ExceptionHandler(DocumentUploadException.class)
+    public ResponseEntity<Map<String, String>> handleUploadError(DocumentUploadException e) {
+        log.warn("Błąd uploadu: {}", e.getMessage());
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(Map.of("error", e.getMessage()));
+    }
+
+    @ExceptionHandler(MinioStorageException.class)
+    public ResponseEntity<Map<String, String>> handleMinioError(MinioStorageException e) {
+        log.error("Błąd MinIO: {}", e.getMessage(), e);
+        return ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE)
+                .body(Map.of("error", e.getMessage()));
+    }
+
+    @ExceptionHandler(IllegalArgumentException.class)
+    public ResponseEntity<Map<String, String>> handleIllegalArg(IllegalArgumentException e) {
+        return ResponseEntity.status(HttpStatus.BAD_REQUEST)
+                .body(Map.of("error", e.getMessage()));
+    }
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/dto/UploadResponse.java ===
+package org.dar316.docuclarity.dto;
+
+import java.time.Instant;
+import java.util.UUID;
+
+/**
+ * Odpowiedź po uploadu dokumentu — zwraca ID i metadane zapisanego dokumentu.
+ */
+public record UploadResponse(
+        UUID documentId,
+        String originalFilename,
+        String contentType,
+        long contentLength,
+        String status,
+        Instant createdAt
+) {
+}
+
+
+=== FILE: src/main/java/org/dar316/docuclarity/dto/DocumentStatusResponse.java ===
+package org.dar316.docuclarity.dto;
+
+import java.time.Instant;
+import java.util.UUID;
+
+/**
+ * Odpowiedź z metadanymi dokumentu i jego statusem przetwarzania.
+ */
+public record DocumentStatusResponse(
+        UUID documentId,
+        String originalFilename,
+        String contentType,
+        long contentLength,
+        String status,
+        int processingAttempts,
+        String errorMessage,
+        Instant createdAt,
+        Instant updatedAt
+) {
+}
+
+
+=== FILE: src/main/resources/application.properties ===
+spring.application.name=DocuClarity
+
+# --- PostgreSQL ---
+spring.datasource.url=${POSTGRES_URL:jdbc:postgresql://localhost:5432/docuclarity}
+spring.datasource.username=${POSTGRES_USER:docuclarity}
+spring.datasource.password=${POSTGRES_PASSWORD:docuclarity}
+spring.datasource.driver-class-name=org.postgresql.Driver
+
+# --- Flyway ---
+spring.flyway.enabled=true
+spring.flyway.locations=classpath:db/migration
+
+# --- Spring Data JDBC ---
+spring.jdbc.template.fetch-size=100
+
+# --- MinIO ---
+docuclarity.minio.endpoint=${MINIO_ENDPOINT:http://localhost:9000}
+docuclarity.minio.access-key=${MINIO_ACCESS_KEY:minioadmin}
+docuclarity.minio.secret-key=${MINIO_SECRET_KEY:minioadmin}
+docuclarity.minio.bucket=${MINIO_BUCKET:docuclarity}
+
+# --- OCR (Tess4J / Tesseract) ---
+# DPI renderowania strony PDF do obrazu (wyższe = lepsza jakość, wolniejszy OCR)
+docuclarity.ocr.render-dpi=300
+# Ścieżka do katalogu tessdata z traineddata
+# Kontener: /usr/share/tesseract-ocr/5/tessdata (ustawione przez TESSDATA_PREFIX)
+# Lokalnie: /usr/share/tessdata
+docuclarity.ocr.tessdata-path=${TESSDATA_PREFIX:/usr/share/tessdata}
+# Język OCR (kody Tesseract, '+' dla wielu, np. eng+pol)
+docuclarity.ocr.language=eng+pol
+# Tryb segmentacji strony (1 = automatic page segmentation with OSD)
+docuclarity.ocr.page-seg-mode=1
+
+# --- Upload ---
+spring.servlet.multipart.max-file-size=100MB
+spring.servlet.multipart.max-request-size=100MB
+
+
+=== FILE: build.gradle ===
+plugins {
+    id 'java'
+    id 'org.springframework.boot' version '4.1.0'
+    id 'io.spring.dependency-management' version '1.1.7'
+    id 'org.asciidoctor.jvm.convert' version '4.0.5'
+}
+
+group = 'org.dar316'
+version = '0.0.1-SNAPSHOT'
+description = 'DocuClarity'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(21)
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+ext {
+    set('snippetsDir', file("build/generated-snippets"))
+}
+
+dependencies {
+    implementation 'org.apache.pdfbox:pdfbox:3.0.8'
+    implementation 'net.sourceforge.tess4j:tess4j:5.20.0'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jdbc'
+    implementation 'org.springframework.boot:spring-boot-starter-data-redis'
+    implementation 'org.springframework.boot:spring-boot-starter-flyway'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    implementation 'org.springframework.boot:spring-boot-starter-webmvc'
+    implementation 'org.springframework.boot:spring-boot-starter-json'
+    implementation 'org.flywaydb:flyway-database-postgresql'
+    implementation 'io.minio:minio:8.5.17'
+    runtimeOnly 'org.postgresql:postgresql'
+    testImplementation 'org.springframework.boot:spring-boot-starter-data-jdbc-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-data-redis-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-flyway-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-restdocs'
+    testImplementation 'org.springframework.boot:spring-boot-starter-validation-test'
+    testImplementation 'org.springframework.boot:spring-boot-starter-webmvc-test'
+    testImplementation 'org.springframework.boot:spring-boot-testcontainers'
+    testImplementation 'org.springframework.restdocs:spring-restdocs-mockmvc'
+    testImplementation 'org.testcontainers:testcontainers-junit-jupiter'
+    testImplementation 'org.testcontainers:testcontainers-postgresql'
+    testImplementation 'org.testcontainers:testcontainers-minio'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+tasks.named('test') {
+    outputs.dir snippetsDir
+    useJUnitPlatform()
+}
+
+tasks.named('asciidoctor') {
+    inputs.dir snippetsDir
+    dependsOn test
+}
+
