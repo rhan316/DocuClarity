@@ -7,6 +7,8 @@ import org.springframework.data.repository.CrudRepository;
 import org.springframework.data.repository.query.Param;
 import org.springframework.stereotype.Repository;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 
 @Repository
@@ -76,4 +78,24 @@ public interface DocumentRepository extends CrudRepository<Document, UUID> {
             analysis_status = 'ANALYZING'
     """)
     int resetStuckAnalysis();
+
+    /**
+     * Znajduje dokumenty oczekujące na analizę LLM dłużej niż threshold.
+     * Używane przez AnalysisRetryScheduler do re-publishu zaginionych żądań
+     *
+     * @param threshold
+     */
+    @Query("""
+        SELECT
+            *
+        FROM
+            documents
+        WHERE
+            analysis_status = 'ANALYSIS_QUEUED' AND updated_at < :threshold
+        ORDER BY
+            updated_at ASC
+        LIMIT
+            50
+    """)
+    List<Document> findStaleAnalysisQueued(@Param("threshold") Instant threshold);
 }

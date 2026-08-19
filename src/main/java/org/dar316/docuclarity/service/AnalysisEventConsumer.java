@@ -217,7 +217,10 @@ public class AnalysisEventConsumer {
             fields.put("payload", jsonPayload);
 
             redisTemplate.opsForStream()
-                    .add(StreamRecords.string(fields).withStreamKey(re))
+                    .add(StreamRecords.string(fields).withStreamKey(requestStreamKey));
+            log.info("Analysis request re-published for document {}", documentId);
+        } catch (Exception e) {
+            log.error("Failed to republish analysis request for document {}", documentId, e);
         }
     }
 
