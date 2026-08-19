@@ -10,6 +10,28 @@
 version: "3"
 
 services:
+  analyzer:
+    build:
+      context: ./analyzer
+      dockerfile: Dockerfile
+    image: docuclarity-analyzer:latest
+    container_name: docuclarity-analyzer
+    environment:
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: minioadmin
+      MINIO_SECRET_KEY: minioadmin
+      MINIO_BUCKET: docuclarity
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY}
+      LLM_MODEL: google/gemma-2-27b-it
+      LLM_TIMEOUT_SECONDS: "300"
+      LLM_MAX_TOKENS: "4096"
+      LLM_TEMPERATURE: "0.2"
+    depends_on:
+      - redis
+      - minio
+    restart: unless-stopped
   redis:
     image: redis:latest
     container_name: docuclarity-redis
