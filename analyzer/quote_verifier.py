@@ -132,6 +132,41 @@ def _numbers_match(quote: str, source: str) -> bool:
 
     return all(n in source_numbers for n in quote_numbers)
 
+def _fuzzy_contains(quote: str, source: str, threshold: float) -> bool:
+    """
+    Sliding window po źródle. Najpierw tanie górne ograniczenia
+    (real_quick_ratio / quick_ratio), pełne ratio tylko gdy są obiecujące
+
+    :param quote:
+    :param source:
+    :param threshold:
+    :return:
+    """
+
+    if len(quote) >= len(source):
+        return SequenceMatcher(None, quote, source).ratio() >= threshold
+
+    window = len(quote)
+    step = max(window // 4, 1)
+    matcher = SequenceMatcher(None, quote) # seq1 ustawione raz
+
+    i = 0
+    while i + window <= len(source):
+        matcher.set_seq2(source[i:i + window])
+        if (matcher.real_quick_ratio() >= threshold
+            and matcher.quick_ratio()  >= threshold
+            and matcher.ratio() >= threshold):
+            return True
+
+        i += step
+
+    # Ostatnie okno - gdy step nie wyrównał się z końcem źródła
+    matcher.set_seq2(source[-window:])
+    return (matcher.real_quick_ratio() >= threshold
+            and matcher.quick_ratio() >= threshold
+            and matcher.ratio() >= threshold
+            )
+
 def _normalize_months(text: str) -> str:
     """Zastępuje polski nazwy miesięcy ich numerami (marca -> 03)."""
     return _MONTH_RE.sub(
