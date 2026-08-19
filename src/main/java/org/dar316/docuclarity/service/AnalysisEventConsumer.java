@@ -175,11 +175,13 @@ public class AnalysisEventConsumer {
             }
 
             int attempts = managed.getAnalysisAttempts();
+
             if (maxAnalysisAttempts > attempts) {
                 managed.setAnalysisStatus(AnalysisStatus.ANALYSIS_QUEUED);
                 managed.setAnalysisErrorMessage(truncate(errorMessage));
 
                 shouldRetry[0] = true;
+                documentRepository.save(managed);
                 log.info("Analysis retry for document {} attempt {}/{}", documentId, attempts, maxAnalysisAttempts);
             } else {
                 // Terminal failure

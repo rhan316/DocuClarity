@@ -52,6 +52,7 @@ class DocumentProcessingServiceTest {
     Tess4jOcrService tess4jOcrService;
     DocumentRepository documentRepository;
     DocumentProgressService documentProgressService;
+    AnalysisService analysisService;
     TransactionTemplate transactionTemplate;
     /**QualityEvaluator zmockowany — testy wymuszają decyzję routingu. */
     PageQualityEvaluator pageQualityEvaluator;
@@ -72,6 +73,7 @@ class DocumentProcessingServiceTest {
         documentProgressService = Mockito.mock(DocumentProgressService.class);
         transactionTemplate = Mockito.mock(TransactionTemplate.class);
         pageQualityEvaluator = Mockito.mock(PageQualityEvaluator.class);
+        analysisService = Mockito.mock(AnalysisService.class);
 
         sut = new DocumentProcessingService(
                 minioStorageService,
@@ -82,7 +84,8 @@ class DocumentProcessingServiceTest {
                 documentProgressService,
                 objectMapper,
                 transactionTemplate,
-                3
+                3,
+                analysisService
         );
     }
 

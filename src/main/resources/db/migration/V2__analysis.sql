@@ -2,7 +2,7 @@
 ALTER TABLE documents
     ADD COLUMN analysis_status TEXT NOT NULL DEFAULT 'NOT_ANALYZED'
         CHECK (analysis_status IN (
-                'NOT_ANALYZED', 'ANALYSIS_QUEUED', 'ANALYZING', 'ANALYZED', 'ANALYZED_FAILED'
+                'NOT_ANALYZED', 'ANALYSIS_QUEUED', 'ANALYZING', 'ANALYZED', 'ANALYSIS_FAILED'
                 )),
     ADD COLUMN analysis_model TEXT,
     ADD COLUMN analysis_attempts INTEGER NOT NULL DEFAULT 0,

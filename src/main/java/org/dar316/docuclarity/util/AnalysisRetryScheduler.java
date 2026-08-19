@@ -14,10 +14,13 @@ import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.data.redis.connection.stream.StreamRecords;
 import org.springframework.data.redis.core.RedisTemplate;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
+import java.time.Duration;
 import java.time.Instant;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 @Component
@@ -41,7 +44,8 @@ public class AnalysisRetryScheduler {
             @Value("${docuclarity.analysis.extracted-key-template:documents/%s/result.json}")
             String extractedKeyTemplate,
             @Value("${docularity.analysis.stale-threshold-seconds:60}")
-            int staleThresholdSeconds
+            int staleThresholdSeconds,
+            DocumentProgressService documentProgressService
     ) {
         this.documentRepository = documentRepository;
         this.redisTemplate = redisTemplate;
@@ -49,11 +53,27 @@ public class AnalysisRetryScheduler {
         this.requestStreamKey = requestStreamKey;
         this.extractedKeyTemplate = extractedKeyTemplate;
         this.staleThresholdSeconds = staleThresholdSeconds;
+        this.documentProgressService = documentProgressService;
+    }
+
+    @Scheduled(fixedDelayString = "${docuclarity.analysis.retry-interval-ms:10000}")
+    public void retryStaleAnalysisRequests() {
+        Instant threshold = Instant.now().minus(Duration.ofSeconds(staleThresholdSeconds));
+        List<Document> staleDocs = documentRepository.findStaleAnalysisQueued(threshold);
+
+        if (staleDocs.isEmpty()) return;
+
+        log.info("Found {} stale ANALYSIS_QUEUED documents", staleDocs.size());
+
+        for (var doc :  staleDocs) {
+            republishAnalysisRequest(doc);
+        }
     }
 
     private void republishAnalysisRequest(Document document) {
         try {
-            String storageKey = String.format(requestStreamKey, document.getId());
+            // TODO: NullPointeException error -> document.getId() may be null
+            String storageKey = String.format(extractedKeyTemplate, document.getId());
             AnalysisRequest request = new AnalysisRequest(
                     document.getId(),
                     storageKey,

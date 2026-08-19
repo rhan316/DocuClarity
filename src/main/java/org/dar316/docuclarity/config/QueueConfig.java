@@ -102,13 +102,30 @@ public class QueueConfig {
             RedisConnectionFactory connectionFactory,
             StreamConsumer streamConsumer,
             @Value("${docuclarity.queue.poll-timeout-ms:2000}") long pollTimeoutMs) {
-        StreamMessageListenerContainer.StreamMessageListenerContainerOptions<String, MapRecord<String, String, String>> options =
-                StreamMessageListenerContainer.StreamMessageListenerContainerOptions.builder()
+        var options = StreamMessageListenerContainer.StreamMessageListenerContainerOptions.builder()
                         .pollTimeout(Duration.ofMillis(pollTimeoutMs))
                         .build();
-        StreamMessageListenerContainer<String, MapRecord<String, String, String>> container =
-                StreamMessageListenerContainer.create(connectionFactory, options);
+        var container = StreamMessageListenerContainer.create(connectionFactory, options);
         streamConsumer.subscribe(container);
+        container.start();
+
+        return container;
+    }
+
+    @Bean
+    public StreamMessageListenerContainer<String, MapRecord<String, String, String>> analysisStreamContainer(
+            RedisConnectionFactory connectionFactory,
+            AnalysisEventConsumer analysisEventConsumer,
+            @Value("${docuclarity.analysis.poll-timeout-ms:2000}")
+            long pollTimeoutMs
+    ) {
+        var options = StreamMessageListenerContainer
+                .StreamMessageListenerContainerOptions.builder()
+                .pollTimeout(Duration.ofMillis(pollTimeoutMs))
+                .build();
+
+        var container =  StreamMessageListenerContainer.create(connectionFactory, options);
+        analysisEventConsumer.subscribe(container);
         container.start();
 
         return container;

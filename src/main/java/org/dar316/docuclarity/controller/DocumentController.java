@@ -1,5 +1,6 @@
 package org.dar316.docuclarity.controller;
 
+import org.dar316.docuclarity.dto.AnalysisResponse;
 import org.dar316.docuclarity.dto.DocumentStatusResponse;
 import org.dar316.docuclarity.dto.UploadResponse;
 import org.dar316.docuclarity.model.Document;
@@ -52,14 +53,14 @@ public class DocumentController {
 
     // Ręcznie inicjuje analizę LLM dokumentu (alternatywqa dla auto-trigger)
     @PostMapping("/{id}/analyze")
-    public ResponseEntity<Map<String, String>> requestAnalysis(@PathVariable UUID documentId) {
-        log.info("Manual analysis requested for document: {}", documentId);
-        analysisService.requestAnalysis(documentId, false);
+    public ResponseEntity<Map<String, String>> requestAnalysis(@PathVariable UUID id) {
+        log.info("Manual analysis requested for document: {}", id);
+        analysisService.requestAnalysis(id, false);
 
         return ResponseEntity.accepted()
                 .body(Map.of(
                         "message", "Analysis queued",
-                        "documentId",  documentId.toString()
+                        "documentId",  id.toString()
                 ));
     }
 
@@ -129,5 +130,21 @@ public class DocumentController {
     public SseEmitter streamProgress(@PathVariable UUID id) {
         log.debug("Client connected to SSE progress stream for document {}", id);
         return documentProgressService.subscribe(id);
+    }
+
+    @GetMapping("/{id}/analysis")
+    public ResponseEntity<AnalysisResponse> getAnalysis(@PathVariable UUID id) {
+        Document document = documentService.getDocument(id);
+        AnalysisResponse response = new AnalysisResponse(
+                document.getId(),
+                document.getAnalysisStatus(),
+                document.getAnalysisModel(),
+                document.getAnalysisErrorMessage(),
+                document.getAnalysisCompletedAt() != null
+                        ? document.getAnalysisCompletedAt().toString() : null,
+                String.format("documents/%s/analysis.json", id)
+        );
+
+        return ResponseEntity.ok(response);
     }
 }

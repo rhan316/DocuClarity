@@ -92,6 +92,7 @@ public class Document implements Persistable<UUID> {
                     Instant updatedAt,
                     String analysisStatus,
                     String analysisModel,
+                    int analysisAttempts,
                     Instant analysisCompletedAt,
                     String analysisErrorMessage) {
         this.id = id;
@@ -106,10 +107,10 @@ public class Document implements Persistable<UUID> {
         this.updatedAt = updatedAt;
         this.analysisStatus = analysisStatus;
         this.analysisModel = analysisModel;
+        this.analysisAttempts = analysisAttempts;
         this.analysisCompletedAt = analysisCompletedAt;
         this.analysisErrorMessage = analysisErrorMessage;
         this.isNew = false;
-        this.analysisStatus = analysisStatus;
     }
 
     public Document() {

@@ -17,6 +17,7 @@ public class DocumentProcessingServiceBuilder {
     private ObjectMapper objectMapper;
     private TransactionTemplate transactionTemplate;
     private int maxProcessingAttempts = 3;
+    private AnalysisService analysisService;
 
     public DocumentProcessingServiceBuilder minioStorageService(MinioStorageService minioStorageService) {
         this.minioStorageService = minioStorageService;
@@ -63,6 +64,11 @@ public class DocumentProcessingServiceBuilder {
         return this;
     }
 
+    public  DocumentProcessingServiceBuilder analysisService(AnalysisService analysisService) {
+        this.analysisService = analysisService;
+        return this;
+    }
+
     public DocumentProcessingService build() {
         Objects.requireNonNull(minioStorageService, "minioStorageService must not be null");
         Objects.requireNonNull(pdfTextExtractionService, "pdfTextExtractionService must not be null");
@@ -71,6 +77,7 @@ public class DocumentProcessingServiceBuilder {
         Objects.requireNonNull(documentRepository, "documentRepository must not be null");
         Objects.requireNonNull(objectMapper, "objectMapper must not be null");
         Objects.requireNonNull(transactionTemplate, "transactionTemplate must not be null");
+        Objects.requireNonNull(documentProgressService, "documentProgressService must not be null");
 
         return new DocumentProcessingService(
                 minioStorageService,
@@ -81,7 +88,8 @@ public class DocumentProcessingServiceBuilder {
                 documentProgressService,
                 objectMapper,
                 transactionTemplate,
-                maxProcessingAttempts
+                maxProcessingAttempts,
+                analysisService
         );
     }
 }

@@ -46,7 +46,7 @@ public class AnalysisService {
             @Qualifier("appObjectMapper") ObjectMapper objectMapper,
             TransactionTemplate transactionTemplate,
             DocumentProgressService documentProgressService,
-            @Value("${docuclarity.analysis.request-stream-key:docularity.analysis.requested}")
+            @Value("${docuclarity.analysis.requested-stream-key:docularity.analysis.requested}")
             String requestStreamKey,
             @Value("${docuclarity.analysis.extracted-key-template:documents/%s/result.json}")
             String extractedKeyTemplate
