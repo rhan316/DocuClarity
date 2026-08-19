@@ -45,6 +45,7 @@ public class DocumentProcessingService {
     private final ObjectMapper objectMapper;
     private final TransactionTemplate transactionTemplate;
     private final int maxProcessingAttempts;
+    private final AnalysisService analysisService;
 
     public DocumentProcessingService(
             MinioStorageService minioStorageService,
@@ -55,7 +56,9 @@ public class DocumentProcessingService {
             DocumentProgressService documentProgressService,
             ObjectMapper objectMapper,
             TransactionTemplate transactionTemplate,
-            int maxProcessingAttempts) {
+            int maxProcessingAttempts,
+            AnalysisService analysisService
+    ) {
         this.minioStorageService = minioStorageService;
         this.pdfTextExtractionService = pdfTextExtractionService;
         this.pageQualityEvaluator = pageQualityEvaluator;
@@ -65,10 +68,7 @@ public class DocumentProcessingService {
         this.objectMapper = objectMapper;
         this.transactionTemplate = transactionTemplate;
         this.maxProcessingAttempts = maxProcessingAttempts;
-    }
-
-    public static DocumentProcessingServiceBuilder builder() {
-        return new DocumentProcessingServiceBuilder();
+        this.analysisService = analysisService;
     }
 
     /**
@@ -270,6 +270,16 @@ public class DocumentProcessingService {
                         : "Document requires manual review"
         ));
         log.info("Przetworzono dokument {} → {}", documentId, decided);
+
+        // Auto-trigger analizy LLM gdy status = COMPLETED
+        if (decided == DocumentStatus.COMPLETED) {
+            try {
+                analysisService.requestAnalysis(documentId);
+                log.info("LLM analysis auto-triggered for document {}", documentId);
+            } catch (Exception e) {
+                log.error("Failed to auto-trigger LLM analysis for document: {} {}", documentId, e.getMessage(), e);
+            }
+        }
     }
 
     private void handleFailure(Document document, Exception e) {

@@ -105,7 +105,7 @@ class DocumentProcessingServiceTest {
     }
 
     /** Wykonuje TransactionCallback.doInTransaction() bez refleksji. */
-    private Object invokeCallback(TransactionCallback cb) {
+    private Object invokeCallback(TransactionCallback<?> cb) {
         return cb.doInTransaction(null);
     }
 

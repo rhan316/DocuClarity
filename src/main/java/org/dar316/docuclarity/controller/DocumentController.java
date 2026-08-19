@@ -3,10 +3,7 @@ package org.dar316.docuclarity.controller;
 import org.dar316.docuclarity.dto.DocumentStatusResponse;
 import org.dar316.docuclarity.dto.UploadResponse;
 import org.dar316.docuclarity.model.Document;
-import org.dar316.docuclarity.service.DocumentNotFoundException;
-import org.dar316.docuclarity.service.DocumentProgressService;
-import org.dar316.docuclarity.service.DocumentService;
-import org.dar316.docuclarity.service.DocumentUploadException;
+import org.dar316.docuclarity.service.*;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.http.MediaType;
@@ -41,10 +38,29 @@ public class DocumentController {
 
     private final DocumentService documentService;
     private final DocumentProgressService documentProgressService;
+    private final AnalysisService analysisService;
 
-    public DocumentController(DocumentService documentService, DocumentProgressService documentProgressService) {
+    public DocumentController(
+            DocumentService documentService,
+            DocumentProgressService documentProgressService,
+            AnalysisService analysisService
+    ) {
         this.documentService = documentService;
         this.documentProgressService = documentProgressService;
+        this.analysisService = analysisService;
+    }
+
+    // Ręcznie inicjuje analizę LLM dokumentu (alternatywqa dla auto-trigger)
+    @PostMapping("/{id}/analyze")
+    public ResponseEntity<Map<String, String>> requestAnalysis(@PathVariable UUID documentId) {
+        log.info("Manual analysis requested for document: {}", documentId);
+        analysisService.requestAnalysis(documentId, false);
+
+        return ResponseEntity.accepted()
+                .body(Map.of(
+                        "message", "Analysis queued",
+                        "documentId",  documentId.toString()
+                ));
     }
 
     /**

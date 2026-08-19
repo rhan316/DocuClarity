@@ -10,14 +10,6 @@ import org.springframework.data.relational.core.mapping.Table;
 import java.time.Instant;
 import java.util.UUID;
 
-/**
- * Encja dokumentu — rekord przesłanego pliku z metadanymi i statusem przetwarzania.
- *
- * Odpowiada tabeli documents w PostgreSQL. Mapowanie przez Spring Data JDBC.
- * Implementuje Persistable — @PersistenceConstructor oznacza konstruktor
- * wywoływany przy odczycie z DB (isNew=false). Domyślny konstruktor ustawia
- * isNew=true, pozwalając na ustawienie ID przed save bez konwersji na UPDATE.
- */
 @Table("documents")
 public class Document implements Persistable<UUID> {
 
@@ -50,10 +42,26 @@ public class Document implements Persistable<UUID> {
     @Column("updated_at")
     private Instant updatedAt;
 
+    @Column("analysis_status")
+    private String analysisStatus;
+
+    @Column("analysis_model")
+    private String analysisModel;
+
+    @Column("analysis_completed_at")
+    private Instant analysisCompletedAt;
+
+    @Column("analysis_error_message")
+    private String analysisErrorMessage;
+
+    @Column("analysis_attempts")
+    private int analysisAttempts;
+
     @Transient
     private boolean isNew = true;
 
-    // Konstruktor dla nowych dokumentów (isNew=true)
+    // --- Konstruktor dla nowych dokumentów (isNew=true) ---
+
     public Document(String originalFilename,
                     String contentType,
                     long contentLength,
@@ -64,15 +72,28 @@ public class Document implements Persistable<UUID> {
         this.storageKey = storageKey;
         this.status = "UPLOADED";
         this.processingAttempts = 0;
+        this.analysisStatus = "NOT_ANALYZED";
         this.isNew = true;
     }
 
-    // Konstruktor dla Spring Data JDBC — odczyt z DB (isNew=false)
+    // --- Konstruktor dla Spring Data JDBC — odczyt z DB (isNew=false) ---
+    // UWAGA: 14 parametrów — musi obejmować wszystkie kolumny z V1 + V2
+
     @PersistenceCreator
-    public Document(UUID id, String originalFilename, String contentType,
-                    long contentLength, String storageKey, String status,
-                    int processingAttempts, String errorMessage,
-                    Instant createdAt, Instant updatedAt) {
+    public Document(UUID id,
+                    String originalFilename,
+                    String contentType,
+                    long contentLength,
+                    String storageKey,
+                    String status,
+                    int processingAttempts,
+                    String errorMessage,
+                    Instant createdAt,
+                    Instant updatedAt,
+                    String analysisStatus,
+                    String analysisModel,
+                    Instant analysisCompletedAt,
+                    String analysisErrorMessage) {
         this.id = id;
         this.originalFilename = originalFilename;
         this.contentType = contentType;
@@ -83,7 +104,12 @@ public class Document implements Persistable<UUID> {
         this.errorMessage = errorMessage;
         this.createdAt = createdAt;
         this.updatedAt = updatedAt;
+        this.analysisStatus = analysisStatus;
+        this.analysisModel = analysisModel;
+        this.analysisCompletedAt = analysisCompletedAt;
+        this.analysisErrorMessage = analysisErrorMessage;
         this.isNew = false;
+        this.analysisStatus = analysisStatus;
     }
 
     public Document() {
@@ -91,85 +117,87 @@ public class Document implements Persistable<UUID> {
 
     // --- Gettery ---
 
-    @Override
-    public UUID getId() {
-        return id;
+    public int getAnalysisAttempts() {
+        return analysisAttempts;
     }
 
     @Override
-    public boolean isNew() {
-        return isNew;
-    }
+    public UUID getId() { return id; }
 
-    public String getOriginalFilename() {
-        return originalFilename;
-    }
+    @Override
+    public boolean isNew() { return isNew; }
 
-    public String getContentType() {
-        return contentType;
-    }
+    public String getOriginalFilename() { return originalFilename; }
 
-    public long getContentLength() {
-        return contentLength;
-    }
+    public String getContentType() { return contentType; }
 
-    public String getStorageKey() {
-        return storageKey;
-    }
+    public long getContentLength() { return contentLength; }
 
-    public String getStatus() {
-        return status;
-    }
+    public String getStorageKey() { return storageKey; }
 
-    /** Zwraca status jako enum (konwersja z String przechowywanego w DB). */
+    public String getStatus() { return status; }
+
     public DocumentStatus getStatusEnum() {
         return status != null ? DocumentStatus.fromCode(status) : null;
     }
 
-    public int getProcessingAttempts() {
-        return processingAttempts;
+    public int getProcessingAttempts() { return processingAttempts; }
+
+    public String getErrorMessage() { return errorMessage; }
+
+    public Instant getCreatedAt() { return createdAt; }
+
+    public Instant getUpdatedAt() { return updatedAt; }
+
+    public String getAnalysisStatus() { return analysisStatus; }
+
+    public AnalysisStatus getAnalysisStatusEnum() {
+        return analysisStatus != null ? AnalysisStatus.fromCode(analysisStatus) : null;
     }
 
-    public String getErrorMessage() {
-        return errorMessage;
-    }
+    public String getAnalysisModel() { return analysisModel; }
 
-    public Instant getCreatedAt() {
-        return createdAt;
-    }
+    public Instant getAnalysisCompletedAt() { return analysisCompletedAt; }
 
-    public Instant getUpdatedAt() {
-        return updatedAt;
-    }
+    public String getAnalysisErrorMessage() { return analysisErrorMessage; }
 
-    // --- Settery (używane przez Spring Data JDBC i logikę biznesową) ---
+    // --- Settery ---
 
-    public void setId(UUID id) {
-        this.id = id;
-    }
+    public void setId(UUID id) { this.id = id; }
 
-    public void setStatus(String status) {
-        this.status = status;
-    }
+    public void setStatus(String status) { this.status = status; }
 
-    /** Ustawia status z enumu (zapis jako kod tekstowy zgodny z CHECK constraint). */
-    public void setStatus(DocumentStatus status) {
-        this.status = status.code();
-    }
+    public void setStatus(DocumentStatus status) { this.status = status.code(); }
 
     public void setProcessingAttempts(int processingAttempts) {
         this.processingAttempts = processingAttempts;
     }
 
-    public void setErrorMessage(String errorMessage) {
-        this.errorMessage = errorMessage;
+    public void setErrorMessage(String errorMessage) { this.errorMessage = errorMessage; }
+
+    public void setCreatedAt(Instant createdAt) { this.createdAt = createdAt; }
+
+    public void setUpdatedAt(Instant updatedAt) { this.updatedAt = updatedAt; }
+
+    public void setAnalysisStatus(String analysisStatus) {
+        this.analysisStatus = analysisStatus;
     }
 
-    public void setCreatedAt(Instant createdAt) {
-        this.createdAt = createdAt;
+    public void setAnalysisStatus(AnalysisStatus analysisStatus) {
+        this.analysisStatus = analysisStatus.code();
     }
 
-    public void setUpdatedAt(Instant updatedAt) {
-        this.updatedAt = updatedAt;
+    public void setAnalysisModel(String analysisModel) { this.analysisModel = analysisModel; }
+
+    public void setAnalysisCompletedAt(Instant analysisCompletedAt) {
+        this.analysisCompletedAt = analysisCompletedAt;
+    }
+
+    public void setAnalysisErrorMessage(String analysisErrorMessage) {
+        this.analysisErrorMessage = analysisErrorMessage;
+    }
+
+    public void setAnalysisAttempts(int analysisAttempts) {
+        this.analysisAttempts = analysisAttempts;
     }
 }

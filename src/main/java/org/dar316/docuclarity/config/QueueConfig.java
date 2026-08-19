@@ -80,7 +80,9 @@ public class QueueConfig {
             DocumentProgressService documentProgressService,
             @Qualifier("appObjectMapper") ObjectMapper objectMapper,
             TransactionTemplate transactionTemplate,
-            @Value("${docuclarity.queue.max-processing-attempts:3}") int maxProcessingAttempts) {
+            @Value("${docuclarity.queue.max-processing-attempts:3}") int maxProcessingAttempts,
+            AnalysisService analysisService
+    ) {
         return new DocumentProcessingService(
                 minioStorageService,
                 pdfTextExtractionService,
@@ -90,7 +92,9 @@ public class QueueConfig {
                 documentProgressService,
                 objectMapper,
                 transactionTemplate,
-                maxProcessingAttempts);
+                maxProcessingAttempts,
+                analysisService
+        );
     }
 
     @Bean

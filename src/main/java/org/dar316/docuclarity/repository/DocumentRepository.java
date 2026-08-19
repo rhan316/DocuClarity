@@ -24,18 +24,56 @@ public interface DocumentRepository extends CrudRepository<Document, UUID> {
      */
     @Modifying
     @Query("""
-        UPDATE documents
-        SET status = 'PROCESSING', processing_attempts = processing_attempts + 1,
-        updated_at = now()
-        WHERE id = :id AND status = 'UPLOADED'
+        UPDATE
+            documents
+        SET
+            status = 'PROCESSING', processing_attempts = processing_attempts + 1,
+            updated_at = now()
+        WHERE
+            id = :id AND status = 'UPLOADED'
     """)
     int claimForProcessing(@Param("id")  UUID id);
 
     @Modifying
     @Query("""
-        UPDATE documents
-        SET status = 'UPLOADED'
-        WHERE status = 'PROCESSING'
+        UPDATE
+            documents
+        SET
+            status = 'UPLOADED'
+        WHERE
+            status = 'PROCESSING'
     """)
     int resetStuckProcessing();
+
+    /**
+     * Atomically claims a document for LLM analysis.
+     * Succeeds only if analysis_status is ANALYSIS_QUEUED.
+     * Increments analysis_attempts atomically.
+     *
+     * @param id
+     * @return
+     */
+    @Modifying
+    @Query("""
+        UPDATE
+            documents
+        SET
+            analysis_status = 'ANALYZING',
+            analysis_attempts = analysis_attempts + 1,
+            updated_at = now()
+        WHERE
+            id = :id AND analysis_status = 'ANALYSIS_QUEUED'
+    """)
+    int claimForAnalysis(@Param("id")  UUID id);
+
+    @Modifying
+    @Query("""
+        UPDATE
+            documents
+        SET
+            analysis_status = 'ANALYSIS_QUEUED'
+        WHERE
+            analysis_status = 'ANALYZING'
+    """)
+    int resetStuckAnalysis();
 }
