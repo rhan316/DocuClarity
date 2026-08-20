@@ -80,6 +80,58 @@ def verify_quotes(
     :param min_fuzzy_length: minimalna długość cytatu dla warstwy FUZZY
     :return: wynik z przefiltrowanych pitfalls; każdy ma pole 'verification`
     """
+    pitfalls = result.get("pitfalls") or []
+    if not pitfalls:
+        return result
+
+    if not source_text or not source_text.strip():
+        log.warning("Empty source text - rejecting all %d pitfalls", len(pitfalls))
+        result["pitfalls"] = []
+        return result
+
+    source_norm = _normalize(source_text)
+    source_letters = _strip_punctuation(source_norm)
+
+    verified = []
+    for i, pitfall in enumerate(pitfalls, 1):
+        title = pitfall.get("title", "untitled")
+        quote = (pitfall.get("quote") or "").strip()
+
+        if not quote:
+            log.warning("Pitfall #%d ('%s'): empty quote - rejected", i, title)
+            continue
+
+        level = _match_level(
+            quote, source_text, source_norm, source_letters, fuzzy_threshold, min_fuzzy_length
+        )
+
+        if level is None:
+            best = _best_similarity(_normalize(quote), source_norm)
+            log.warning("Pitfall #%d ('%s'): quote NOT found in source "
+                        "(best similarity %.2f, fuzzy threshold %.2f) - rejected",
+                        i, title, best, fuzzy_threshold,
+                        )
+            continue
+
+        if not _numbers_match(quote, source_text):
+            log.warning(
+                "Pitfall #%d ('%s'): verified as %s but contains numbers "
+                "absent from source (hallucinated amount/date?) - rejected",
+                i, title, level
+            )
+            continue
+
+        pitfall["verification"] = level
+        verified.append(pitfall)
+        log.debug("Pitfall #%d ('%s') verified as %s", i, title, level)
+
+        log.info(
+            "Quote verification: %d/%d accepted, %d rejected",
+            len(verified), len(pitfalls), len(pitfalls) - len(verified),)
+
+        result["pitfalls"] = verified
+        return result
+
 
 def _match_level(
         quote, source_raw, source_norm, source_letters,
@@ -92,6 +144,22 @@ def _match_level(
         return EXACT
 
     # Warstwa 2: dopasowanie po normalizacji
+    quote_norm = _normalize(quote)
+    if quote_norm and quote_norm in source_norm:
+        return NORMALIZED
+
+    # Warstwa 2b: normalizacja + usunięcie interpunkcji
+    # Łapie przypadki typu "1.000zł vs 1 000zł", różne przecinki itp.
+    quote_letters = _strip_punctuation(quote_norm)
+    if quote_letters and quote_letters in source_letters:
+        return NORMALIZED
+
+    # Warstwa 3: fuzzy - wyłącznie drobne różnice, tylko długie cytaty
+    if len(quote_norm) >= MIN_FUZZY_QUOTE_LENGTH:
+        if _fuzzy_contains(quote_norm, source_norm, fuzzy_threshold):
+            return FUZZY
+
+    return None
 
 
 # Light normalization
