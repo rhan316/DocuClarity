@@ -1,5 +1,6 @@
 package org.dar316.docuclarity.config;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import org.springframework.context.annotation.Bean;
@@ -19,6 +20,7 @@ public class JacksonConfig {
     @Bean(name = "appObjectMapper")
     public ObjectMapper appObjectMapper() {
         return new ObjectMapper()
-                .registerModule(new JavaTimeModule());
+                .registerModule(new JavaTimeModule())
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false);
     }
 }

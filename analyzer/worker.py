@@ -17,7 +17,9 @@ import redis
 from minio import Minio
 from minio.error import S3Error
 
-from analyzer.analyzer import LlmClient
+from analyzer import LlmClient
+from analyzer.chunker import chunk_page
+from analyzer.quote_verifier import verify_quotes
 
 logging.basicConfig(
     level=logging.INFO,
@@ -187,6 +189,32 @@ def process_analysis(r, minio, llm, msg_id, fields):
                 error_message="Extracted text is empty"
             )
             return
+
+        # Chunk if needed
+        chunks = chunk_page(text, page_num=1)
+        if not chunks:
+            publish_completion(r, document_id, "ANALYSIS_FAILED",
+                            error_message="No text to analyze after chunking")
+            return
+
+        # Analyze each chunk, merge results
+        combined_result = {"plainText": [], "summary": {}, "pitfalls": []}
+        for chunk in chunks:
+            result = llm.analyze(chunk.text)
+            if result is None:
+                publish_completion(
+                    r, document_id, "ANALYSIS_FAILED",
+                    error_message="LLM analysis returned None"
+                )
+                return
+
+            combined_result["plainText"].append(result.get("plainText", ""))
+            combined_result["pitfalls"].extend(result.get("pitfalls", []))
+            if result.get("summary"):
+                combined_result["summary"] = result["summary"]
+
+        combined_result["plainText"] = "\n\n".join(combined_result["plainText"])
+        combined_result = verify_quotes(combined_result, text)
 
         # 2. Wywołanie LLM
         result = llm.analyze(text)

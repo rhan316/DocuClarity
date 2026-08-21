@@ -43,7 +43,7 @@ public class AnalysisRetryScheduler {
             String requestStreamKey,
             @Value("${docuclarity.analysis.extracted-key-template:documents/%s/result.json}")
             String extractedKeyTemplate,
-            @Value("${docularity.analysis.stale-threshold-seconds:60}")
+            @Value("${docuclarity.analysis.stale-threshold-seconds:60}")
             int staleThresholdSeconds,
             DocumentProgressService documentProgressService
     ) {

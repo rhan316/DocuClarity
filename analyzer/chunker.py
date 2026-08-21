@@ -104,7 +104,7 @@ def chunk_page(
 
             word_chunks = _split_by_words(para, max_chars)
 
-            for wc_text in word_chunks(para, max_chars)
+            for wc_text in word_chunks:
                 chunks.append(TextChunk(
                     text=wc_text,
                     chunk_id=len(chunks) + 1,
@@ -129,3 +129,70 @@ def chunk_page(
             page_num, total, len(text), max_chars,
         )
         return chunks
+
+def chunk_document(pages: List[dict], max_chars: int = DEFAULT_MAX_CHARS) -> List[TextChunk]:
+    """
+    Dzieli cały dokument na chunki per strona.
+
+    :param pages: lista dict {pageNum, text}
+    :param max_chars: limit znaków na chunk
+    :return: TextChunk obejmująca wszystkie strony w kolejności
+    """
+
+    all_chunks: List[TextChunk] = []
+
+    for page in pages:
+        page_num = page.get("pageNum", 0)
+        text = page.get("text", "")
+        page_chunks = chunk_page(text, page_num, max_chars)
+
+        for c in page_chunks:
+            c.chunk_id = len(all_chunks) + 1
+            all_chunks.append(c)
+
+    return all_chunks
+
+def estimate_tokens(text: str) -> int:
+    return len(text) // CHARS_PER_TOKEN
+
+def fits_in_window(text: str, max_chars: int = DEFAULT_MAX_CHARS) -> bool:
+    return len(text) <= max_chars
+
+def _split_paragraphs(text: str) -> List[str]:
+    return [p.strip() for p in _PARA_SPLIT_RE.split(text) if p.strip()]
+
+def _flush(parts: List[str], page_num: int, chunk_id: int) -> TextChunk:
+    text = "\n\n".join(parts)
+    return TextChunk(
+        text=text,
+        chunk_id=chunk_id,
+        page_num=page_num,
+        chunk_in_page=chunk_id,
+        total_chunks_in_page=0,
+        char_start=0,
+        char_end=len(text)
+    )
+
+def _split_by_words(text: str, max_chars: int) -> List[str]:
+    words = text.split()
+    chunks: List[str] = []
+    current: List[str] = []
+    current_len: int = 0
+
+    for word in words:
+        word_len = len(word) + 1
+
+        if current_len + word_len > max_chars and current:
+            chunks.append(" ".join(current))
+            # Keep overlap: last WORD_OVERLAP words carry over
+            overlap = current[-WORD_OVERLAP:] if len(current) > WORD_OVERLAP else current
+            current = list(overlap)
+            current_len = sum(len(w) + 1 for w in current)
+
+        current.append(word)
+        current_len += word_len
+
+    if current:
+        chunks.append(" ".join(current))
+
+    return chunks

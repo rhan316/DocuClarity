@@ -12,7 +12,7 @@ import httpx
 from schema import ANALYSIS_SCHEMA
 import json_repair
 
-from analyzer.prompts import SYSTEM_PROMPT, build_user_prompt
+from prompts import SYSTEM_PROMPT, build_user_prompt
 
 log = logging.getLogger(__name__)
 

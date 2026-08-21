@@ -5,7 +5,7 @@ WORKDIR /app
 COPY requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY worker.py analyzer.py prompts.py ./
+COPY worker.py analyzer.py prompts.py schema.py chunker.py quote_verifier.py ./
 
 ENV PYTHONUNBUFFERED=1
 

@@ -25,7 +25,7 @@ import re
 from difflib import SequenceMatcher
 from typing import Optional
 
-log = logging.getLogger("__name__")
+log = logging.getLogger(__name__)
 
 # --- Poziomy weryfikacji (zapisywane jako pitfall["verification"]
 EXACT = "EXACT"
@@ -125,12 +125,12 @@ def verify_quotes(
         verified.append(pitfall)
         log.debug("Pitfall #%d ('%s') verified as %s", i, title, level)
 
-        log.info(
-            "Quote verification: %d/%d accepted, %d rejected",
-            len(verified), len(pitfalls), len(pitfalls) - len(verified),)
+    log.info(
+        "Quote verification: %d/%d accepted, %d rejected",
+        len(verified), len(pitfalls), len(pitfalls) - len(verified),)
 
-        result["pitfalls"] = verified
-        return result
+    result["pitfalls"] = verified
+    return result
 
 
 def _match_level(

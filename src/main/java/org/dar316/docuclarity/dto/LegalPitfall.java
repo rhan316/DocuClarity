@@ -14,6 +14,7 @@ public record LegalPitfall(
         String quote,
         String explanation,
         String severity,
-        Integer pageNumber
+        Integer pageNumber,
+        String verification
 ) {
 }

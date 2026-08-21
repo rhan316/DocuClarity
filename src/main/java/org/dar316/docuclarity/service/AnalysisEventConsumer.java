@@ -140,7 +140,7 @@ public class AnalysisEventConsumer {
                 String json = objectMapper.writeValueAsString(result);
                 minioStorageService.uploadJson(storageKey, json);
                 log.info("Analysis result saved to MinIO: {}", storageKey);
-            } catch (JsonProcessingException e) {
+            } catch (Exception e) {
                 log.error("Failed to save analysis result to MinIO for document {}", documentId, e);
             }
 
@@ -177,9 +177,9 @@ public class AnalysisEventConsumer {
             int attempts = managed.getAnalysisAttempts();
 
             if (maxAnalysisAttempts > attempts) {
+                managed.setAnalysisAttempts(attempts + 1);
                 managed.setAnalysisStatus(AnalysisStatus.ANALYSIS_QUEUED);
                 managed.setAnalysisErrorMessage(truncate(errorMessage));
-
                 shouldRetry[0] = true;
                 documentRepository.save(managed);
                 log.info("Analysis retry for document {} attempt {}/{}", documentId, attempts, maxAnalysisAttempts);
@@ -208,7 +208,7 @@ public class AnalysisEventConsumer {
 
     private void republishAnalysisRequest(UUID documentId) {
         try {
-            String storageKey = String.format(analysisResultKeyTemplate, documentId);
+            String storageKey = String.format(extractedKeyTemplate, documentId);
             AnalysisRequest request = new AnalysisRequest(
                     documentId, storageKey, Instant.now()
             );

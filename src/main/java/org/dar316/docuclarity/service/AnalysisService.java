@@ -46,7 +46,7 @@ public class AnalysisService {
             @Qualifier("appObjectMapper") ObjectMapper objectMapper,
             TransactionTemplate transactionTemplate,
             DocumentProgressService documentProgressService,
-            @Value("${docuclarity.analysis.requested-stream-key:docularity.analysis.requested}")
+            @Value("${docuclarity.analysis.request-stream-key:docuclarity.analysis.requested}")
             String requestStreamKey,
             @Value("${docuclarity.analysis.extracted-key-template:documents/%s/result.json}")
             String extractedKeyTemplate
@@ -76,6 +76,8 @@ public class AnalysisService {
     private void requestAnalysisInternal(UUID documentId, boolean autoTriggered) {
         log.info("Requesting LLM analysis for document: {} (autoTriggered={})", documentId, autoTriggered);
 
+        final boolean[] shouldSkip = {false};
+
         // 1. Validation and atomic status update within a transaction
         transactionTemplate.executeWithoutResult(status -> {
             Document managed = documentRepository.findById(documentId)
@@ -93,6 +95,7 @@ public class AnalysisService {
                     || currentAnalysis == AnalysisStatus.ANALYZING) {
                 log.info("Document {} already has analysis in progress (status={}), skipping",
                         documentId, currentAnalysis);
+                shouldSkip[0] = true;
                 return;
             }
 
@@ -100,6 +103,11 @@ public class AnalysisService {
             managed.setAnalysisErrorMessage(null);
             documentRepository.save(managed);
         });
+
+        if (shouldSkip[0]) {
+            log.info("Skipping analysis publish for document: {} - already in progress", documentId);
+            return;
+        }
 
         // 2. Publikacja żądania do Redis Streams
         String storageKey = String.format(extractedKeyTemplate, documentId);
