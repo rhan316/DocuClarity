@@ -18,8 +18,9 @@ from minio import Minio
 from minio.error import S3Error
 
 from analyzer import LlmClient
-from analyzer.chunker import chunk_page
-from analyzer.quote_verifier import verify_quotes
+from chunker import chunk_page
+from quote_verifier import verify_quotes
+from merger import merge_results
 
 logging.basicConfig(
     level=logging.INFO,
@@ -198,7 +199,8 @@ def process_analysis(r, minio, llm, msg_id, fields):
             return
 
         # Analyze each chunk, merge results
-        combined_result = {"plainText": [], "summary": {}, "pitfalls": []}
+        chunk_results: list = []
+
         for chunk in chunks:
             result = llm.analyze(chunk.text)
             if result is None:
@@ -208,28 +210,14 @@ def process_analysis(r, minio, llm, msg_id, fields):
                 )
                 return
 
-            combined_result["plainText"].append(result.get("plainText", ""))
-            combined_result["pitfalls"].extend(result.get("pitfalls", []))
-            if result.get("summary"):
-                combined_result["summary"] = result["summary"]
+            chunk_results.append(result)
 
-        combined_result["plainText"] = "\n\n".join(combined_result["plainText"])
+        combined_result = merge_results(chunk_results)
         combined_result = verify_quotes(combined_result, text)
-
-        # 2. Wywołanie LLM
-        result = llm.analyze(text)
-        if result is None:
-            publish_completion(
-                r, document_id, "ANALYSIS_FAILED",
-                error_message="LLM analysis returned None"
-            )
-            return
-
-        # 3. Zapis do MinIO
-        storage_key_result = write_analysis_to_minio(minio, document_id, result)
-
-        # 4. Publikacja sukcesu z pełnym wynikiem
-        publish_success(r, document_id, result, llm.model, storage_key_result)
+        storage_key_result = write_analysis_to_minio(minio, document_id, combined_result)
+        publish_success(
+            r, document_id, combined_result, llm.model, storage_key_result
+        )
 
         log.info("Analysis completed for document %s", document_id)
 

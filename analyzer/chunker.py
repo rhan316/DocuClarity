@@ -102,9 +102,7 @@ def chunk_page(
                 chunks.append(_flush(buffer, page_num, len(chunks) + 1))
                 buffer, buffer_len = [], 0
 
-            word_chunks = _split_by_words(para, max_chars)
-
-            for wc_text in word_chunks:
+            for wc_text in _split_by_words(para, max_chars):
                 chunks.append(TextChunk(
                     text=wc_text,
                     chunk_id=len(chunks) + 1,
@@ -118,17 +116,23 @@ def chunk_page(
 
         if buffer_len + para_len > max_chars:
             chunks.append(_flush(buffer, page_num, len(chunks) + 1))
+            buffer, buffer_len = [], 0
 
-        total = len(chunks)
+        buffer.append(para)
+        buffer_len += para_len
 
-        for c in chunks:
-            c.total_chunks_in_page = total
+    if buffer:
+        chunks.append(_flush(buffer, page_num, len(chunks) + 1))
 
-        log.info(
-            "Page %d chunked: %d chunks (original %d chars, max %d per chunk",
-            page_num, total, len(text), max_chars,
-        )
-        return chunks
+    total = len(chunks)
+
+    for c in chunks:
+        c.total_chunks_in_page = total
+    
+    log.info("Page %d chunked: %d chunks (original %d chars, max %d per chunk)",
+         page_num, total, len(text), max_chars)
+
+    return chunks
 
 def chunk_document(pages: List[dict], max_chars: int = DEFAULT_MAX_CHARS) -> List[TextChunk]:
     """
